@@ -1,96 +1,345 @@
-# Kandinsky calibration for image segmentation models
+# Preliminary Experiment: Correlation Between CP Area Stabilization and Segmentation Quality
 
-## Example usage
+## Overview
 
-We will train, calibrate and evaluate a model on the MS-COCO dataset, restricting attention to the "person" class.
+This document describes a preliminary experiment built on top of the [kandinsky-calibration](https://github.com/NKI-AI/kandinsky-calibration) repository.
 
-### Preparation
+The goal of this experiment is **not** to perform a full-scale benchmark.  
+Instead, the purpose is to check the following simple hypothesis:
 
-Start by installing the requirements (preferably in a conda environment):
+> Images with better segmentation quality tend to reach a stable conformal prediction (CP) area earlier when the CP threshold is varied.
 
+More concretely, we investigate whether a curve derived from CP prediction-set area is correlated with the segmentation quality of each image, measured by **IoU**.
+
+---
+
+## Motivation
+
+For a given image, CP produces a prediction set whose area changes as the threshold changes.
+
+Intuitively:
+
+- for **easy / well-segmented images**, the prediction-set area may shrink quickly and become stable early,
+- for **hard / poorly-segmented images**, the area may keep changing for longer and stabilize later.
+
+If this tendency exists, then the **stabilization behavior of the CP area curve** may be useful as a proxy for image-level uncertainty.
+
+This README focuses on verifying that idea with a lightweight experiment.
+
+---
+
+## Main Hypothesis
+
+We test the following claim:
+
+> For images with high IoU, the CP prediction-set area becomes stable earlier.  
+> For images with low IoU, the area stabilizes later.
+
+Equivalently:
+
+- high IoU -> small stabilization time
+- low IoU -> large stabilization time
+
+---
+
+## Experimental Setting
+
+### Task
+
+Binary segmentation on **COCO-person**.
+
+### Why COCO-person?
+
+This dataset is used because:
+
+- it is easy to convert into a binary segmentation task,
+- the kandinsky-calibration repository is already designed around COCO-person,
+- it is suitable for a first correlation study.
+
+### Nature of This Experiment
+
+This is a **preliminary / pilot experiment**.
+
+We only want to know whether there is a rough correlation trend.  
+We do **not** aim to claim final results from this experiment.
+
+---
+
+## Definition of the Curve
+
+For an image `x` and CP threshold `a`, let:
+
+- `S_x(a)` = CP prediction set for image `x` at threshold `a`
+- `A_x(a) = |S_x(a)|` = area (number of pixels) of the prediction set
+
+Then the basic area curve is:
+
+`a -> A_x(a)`
+
+To normalize across images, define the area ratio as:
+
+`r_x(a) = A_x(a) / (A_x(a_min) + eta)`
+
+where:
+
+- `a_min` is the smallest threshold in the sweep,
+- `eta` is a small constant to avoid division by zero.
+
+Thus, `r_x(a)` starts near `1` and decreases as the prediction set shrinks.
+
+---
+
+## Area-Change Curve
+
+We define the local area change as:
+
+`d_x(a) = |r_x(a + Delta) - r_x(a)|`
+
+where `Delta` is the threshold step.
+
+This quantity measures how much the normalized CP area changes between adjacent thresholds.
+
+---
+
+## Stabilization Time
+
+Our main metric is the **stabilization time** of the area curve.
+
+For image `x`, define:
+
+`tau_stab(x) = min { a | d_x(a), d_x(a+Delta), ..., d_x(a+(w-1)Delta) <= epsilon, and 1 - r_x(a) >= rho }`
+
+### Interpretation
+
+This means:
+
+1. the area change remains small for `w` consecutive steps  
+   -> the curve has entered a stable region
+
+2. the area has already shrunk by at least `rho`  
+   -> we exclude curves that are flat only because they never meaningfully changed
+
+### Parameters
+
+- `w`: window size for consecutive stability
+- `epsilon`: tolerance for small area change
+- `rho`: minimum shrinkage ratio before stability can be declared
+
+These hyperparameters will be fixed later for the pilot experiment.
+
+---
+
+## Segmentation Quality
+
+For each test image, we compute:
+
+- the **initial segmentation IoU**
+- the curve-based metric `tau_stab(x)`
+
+Then we study whether these two values are correlated.
+
+---
+
+## What Will Be Evaluated
+
+For each test image, we will compute:
+
+1. **IoU** of the initial segmentation
+2. **stabilization time** `tau_stab(x)` from the CP area curve
+
+Then we will analyze the following:
+
+### 1. Scatter Plot
+
+- x-axis: IoU
+- y-axis: `tau_stab(x)`
+
+Expected trend:
+
+- high-IoU images should appear lower on the plot
+- low-IoU images should appear higher on the plot
+
+
+### 2. Optional Box Plot (Optional, not implement now)
+
+We may additionally split images into:
+
+- high-IoU group
+- low-IoU group
+
+and compare the distribution of `tau_stab`.
+
+---
+
+## Dataset Subset
+
+Because the available GPU is **RTX 3060 Ti 8GB**, the experiment is intentionally kept small.
+
+### Initial Split
+
+A lightweight first split is:
+
+- **train**: 300 images
+- **calibration**: 100 images
+- **test**: 100 images
+
+This is only meant to produce a first scatter plot and check whether the hypothesis is plausible.
+
+---
+
+## COCO-person Filtering Rule
+
+To avoid extremely difficult or degenerate examples in the first pilot run, we filter candidate images using the following conditions:
+
+- the image contains at least **one person**
+- total person-mask area ratio is between **1% and 40%**
+- the number of persons is **1**
+
+After filtering, we randomly sample images and split them into:
+
+- train: 300
+- calibration: 100
+- test: 100
+
+### Reason for These Conditions
+
+These constraints are introduced to avoid unstable cases in the first experiment:
+
+- very small objects can make the curve noisy,
+- very large objects can dominate the image from the beginning,
+- too many persons can introduce crowding effects that may dominate uncertainty behavior.
+
+---
+
+## Training Strategy
+
+1. train a segmentation model on a small COCO-person subset,
+2. Implement pixcel-wise calibration
+3. evaluate the CP behavior on the test set.
+
+We want a model that produces a reasonable spread of IoU values, so that the correlation with the curve-derived metric can be observed.
+
+---
+
+## Planned Workflow
+
+### Step 1. Prepare a Small COCO-person Subset
+
+Create filtered train / calibration / test splits satisfying the conditions above.
+
+### Step 2. Train a Base Segmentation Model
+
+Train a base segmentation model on the small COCO-person training subset using the kandinsky-calibration repository.
+
+### Step 3. Run Pixel-wise Calibration
+
+Run **pixel-wise calibration** on the calibration split.
+
+In this experiment, we do **not** use the full Kandinsky grouping procedure.  
+Instead, we only use the **pixel-wise calibration** stage and obtain a non-conformity curve for each pixel location.
+
+More specifically, calibration produces `nc_curves`, which store pixel-wise threshold values across multiple confidence / quantile levels.
+
+**Minimal command (after training)**
+
+This writes a calibrated checkpoint `cmodel.ckpt` under `logs/calibrate/runs/.../`.
+
+```bash
+python src/calibrate.py ckpt_path=/path/to/trained_model.ckpt
 ```
-python -m pip install -r requirements.txt
+
+### Step 4. Sweep the Calibration Levels and Build Prediction Sets
+
+For each test image:
+
+- sweep the calibration level `a`,
+- retrieve the corresponding pixel-wise threshold map from `nc_curves`,
+- construct the prediction set `S_x(a)` by checking, at each pixel, whether the model output is large enough relative to the threshold,
+- compute the area `A_x(a) = |S_x(a)|`,
+- compute the normalized area ratio `r_x(a)`,
+- compute the area-change measure `d_x(a)`,
+- compute `tau_stab(x)`.
+
+More concretely, if the model output probability at a pixel is `p` and the calibrated non-conformity threshold at level `a` is `q_a`, then the pixel is included in the mask when
+
+`1 - p <= q_a`
+
+which is equivalently written as
+
+`p >= 1 - q_a`.
+
+**Minimal command (generate per-image area curves)**
+
+This produces per-image PNGs and a `summary.csv` (IoU + `tau_stab`) under `logs/area_curve/runs/.../area_curves/`.
+
+```bash
+python src/area_curve.py ckpt_path=/path/to/logs/calibrate/runs/.../cmodel.ckpt
 ```
 
-Now we need to download MS-COCO and prepare the relevant subset. We use `fiftyone` for this. Configure the target directories in `src/utils/coco-prepare.py` and run the file. The download and export will take a while (~1.5h approximately). The test set of MS-COCO is not labeled, so we repurpose the validation set for testing. We then split the original train set into train, validation, and calibration data.
+Useful overrides:
 
-Our goal is to calibrate a miscalibrated model. Obtaining such a miscalibrated model is easier if we train on a small number of images. We also do not need many validation images, since optimizing training is not relevant here. We therefore use most of COCO's original train split as calibration data (and we can later choose to reduce the number of calibration images to evaluate different calibration methods in a low-data scenario). To make the train/validation/calibration manifest files, run `src/utils/coco-split.py`.
+```bash
+# process only first 100 test images
+python src/area_curve.py ckpt_path=... max_images=100
 
-The notebook `notebooks/check-coco.ipynb` can be used to verify that the training and validation splits were properly created and that they can be located by the `CocoDataset`.
-
-### Training
-
-Set the environment variables `DATA_TRAINVAL_ROOT` and `DATA_TEST_ROOT`. A sample training configuration for training a UNet on 1000 images (this split should have been created in the preparation step) is provided in `configs/experiment/train_coco-person_t1000.yaml`. Run
-
-```
-python src/train.py experiment=train_coco-person_t1000
+# change alpha sweep and stabilization hyperparameters
+python src/area_curve.py ckpt_path=... alpha_max=0.8 alpha_steps=81 w=5 epsilon=0.005 rho=0.2
 ```
 
-until you get sufficiently many model checkpoints to choose from. The models with a larger generalization gap (`val_loss - train_loss`) are usually less calibrated,[<sup>1</sup>](https://arxiv.org/abs/2210.01964) and are therefore good testing grounds for the Kandinsky method. Furthermore, the validation Dice score will usually keep rising even after validation loss has hit a minimum, which is another reason that you might not want to stop training early. In the default setup, 250 epochs of training should suffice. Validation Dice and loss curves will look approximately like this:
+### Step 5. Compare Against IoU
 
-<img src="imgs/val_dice.png" width="300px"/> <img src="imgs/val_loss.png" width="300px"/>
+For each test image:
 
-You can check the (mis)calibration properties of the model checkpoints by running
+- collect IoU
+- collect `tau_stab(x)`
 
-```
-python src/eval.py ckpt_path=logs/train/runs/train_coco-person_t1000/<rest of checkpoint path>
-```
+Then generate:
 
-and inspecting the resulting images in `logs/eval/...`. Here we show an example of the Expected Calibration Error (ECE) plotted for each individual pixel:
+- scatter plot
+- Pearson correlation
+- Spearman correlation
+- optional box plot
 
-![](imgs/person-pixelwise_ece.png)
+---
 
-### Calibrating
+## Expected Result
 
-Calibration amounts to evaluating the trained model on a calibration set and storing the resulting non-conformity scores per pixel. These can subsequently be used for computing non-conformity *curves* (a list of 100 equally spaced quantiles of the nc-scores), where the chosen calibration method (i.e. pixel/image/kandinsky) determines how we go from the *scores* to the *curves*.
+The expected trend is:
 
-Running calibration is as simple as
+- **high IoU images** stabilize earlier
+- **low IoU images** stabilize later
 
-```
-# pixelwise
-python src/calibrate.py experiment=cal_coco-person_t1000_c2000_pixel ckpt_path=logs/train/runs/train_coco-person_t1000/...
-# imagewise
-python src/calibrate.py experiment=cal_coco-person_t1000_c2000_image ckpt_path=logs/train/runs/train_coco-person_t1000/...
-# kandinsky (k-means clustering)
-python src/calibrate.py experiment=cal_coco-person_t1000_c2000_kmeans ckpt_path=logs/train/runs/train_coco-person_t1000/...
-# kandinsky (genetic annuli optimization)
-python src/calibrate.py experiment=cal_coco-person_t1000_c2000_gen-ann ckpt_path=logs/train/runs/train_coco-person_t1000/...
-```
+That is:
 
-In this example we are using 2.000 images for calibration. The calibrated checkpoint is stored in a subfolder of `logs/calibrate/runs/cal_coco-person_t1000_c20000_<method>` as `cmodel.ckpt`. This checkpoint has a field `nc_curves` that contains the nonconformity curves for every pixel in the form of a `[100, C, H, W]` tensor. Depending on the chosen calibration method, these curves may differ per pixel (pixelwise), be identical for every pixel (imagewise), or differ by pixel grouping (kandinsky). The upshot is that this tensor can be used for creating each pixel's prediction set at the desired confidence level.
+`IoU increases -> tau_stab decreases`  
+`IoU decreases -> tau_stab increases`
 
-### Evaluating
+If this tendency is visible even roughly, then the area-stabilization behavior may serve as a useful uncertainty-related image-level signal.
 
-Models can be tested using the same evaluation script as mentioned earlier:
+---
 
-```
-python src/eval.py ckpt_path=logs/calibrate/runs/<experiment name>/cmodel.ckpt experiment=eval_coco-person_t1000_c2000_pixel
-```
+## Items Still To Be Decided
 
-Calibrated models contain the field `nc_curves` and the evaluation procedure will output additional output plots and a tensor containing the per-pixel coverage error if this field is found.
+The following parts are not fixed yet.
 
-## Citation
+### 1. Threshold Sweep Design
 
-If you use Kandinsky calibration in your own research, please consider citing the companion [paper](https://arxiv.org/abs/2311.11837).
+We still need to decide how to choose the threshold values `a`.
 
-```bibtex
-@misc{kandinskycp2023,
-  title = {Kandinsky {{Conformal Prediction}}: {{Efficient Calibration}} of {{Image Segmentation Algorithms}}},
-  author = {Brunekreef, Joren and Marcus, Eric and Sheombarsing, Ray and Sonke, Jan-Jakob and Teuwen, Jonas},
-  year = {2023},
-  month = nov,
-  number = {arXiv:2311.11837},
-  eprint = {2311.11837},
-  primaryclass = {cs},
-  publisher = {{arXiv}},
-  doi = {10.48550/arXiv.2311.11837},
-  urldate = {2023-11-27},
-  abbr = {arXiv},
-  archiveprefix = {arxiv},
-  keywords = {Computer Science - Artificial Intelligence,Computer Science - Computer Vision and Pattern Recognition,Computer Science - Machine Learning}
-}
-```
+Possible options:
 
-## Acknowledgments
+- uniformly spaced thresholds
+- quantile-based thresholds
 
-Our codebase was built upon the [Lightning Hydra template](https://github.com/ashleve/lightning-hydra-template) by Lukasz Zalewski.
+### 2. Hyperparameters of `tau_stab`
+
+The following parameters must be determined:
+
+- `w`
+- `epsilon`
+- `rho`
+
+Since this is only a pilot study, these values do not need to be perfectly optimized.  
+We only need values that are reasonable enough to check whether the trend exists.
+
+---

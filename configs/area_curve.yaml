@@ -1,0 +1,37 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - data: coco
+  - model: segmentation
+  - paths: default
+  - extras: default
+  - hydra: default
+
+task_name: "area_curve"
+tags: ["dev"]
+
+# Calibrated checkpoint produced by `src/calibrate.py` (contains nc_curves)
+ckpt_path: ???
+
+# Foreground channel index (0=background, 1=person)
+fg_class_idx: 1
+
+# Base segmentation threshold for IoU reference
+base_seg_threshold: 0.5
+
+# Alpha sweep (miscoverage); prediction set shrinks as alpha increases
+alpha_min: 0.0
+alpha_max: 0.5
+alpha_steps: 51
+
+# Area ratio normalization constant
+eta: 1.0e-6
+
+# Stabilization hyperparameters (see README)
+w: 5
+epsilon: 5.0e-3
+rho: 0.2
+
+# Limit number of test images processed (null = all)
+max_images: 50
