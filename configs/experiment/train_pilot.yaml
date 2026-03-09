@@ -15,12 +15,12 @@ trainer:
 data:
   batch_size: 16
   trainval_split: "pilot"
-  num_workers: 4
+  num_workers: 0
 
 model:
   net:
     _target_: src.models.components.unet.UNet
-    channels: 128
+    channels: 64
     in_channels: 3
     out_channels: 2
   scheduler:
