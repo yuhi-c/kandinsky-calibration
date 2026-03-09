@@ -17,6 +17,7 @@ class CocoDataModule(LightningDataModule):
         trainval_root: Union[str, Path],
         test_root: Union[str, Path],
         trainval_split: str = "1000",
+        test_split: Optional[str] = None,
         batch_size: int = 16,
         num_workers: int = 0,
         dims: tuple = (256, 256),
@@ -30,6 +31,7 @@ class CocoDataModule(LightningDataModule):
         self.test_root = Path(test_root)
 
         self.trainval_split = trainval_split
+        self.test_split = test_split
 
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -48,7 +50,7 @@ class CocoDataModule(LightningDataModule):
                 data_dir=self.trainval_root,
                 manifest_fn=self.trainval_root
                 / "splits"
-                / f"t{self.trainval_split}"
+                / self.trainval_split
                 / "labels_train.json",
                 dims=self.dims,
                 transforms=self.augmentations,
@@ -57,7 +59,7 @@ class CocoDataModule(LightningDataModule):
                 data_dir=self.trainval_root,
                 manifest_fn=self.trainval_root
                 / "splits"
-                / f"t{self.trainval_split}"
+                / self.trainval_split
                 / "labels_val.json",
                 dims=self.dims,
             )
@@ -67,7 +69,7 @@ class CocoDataModule(LightningDataModule):
                 data_dir=self.trainval_root,
                 manifest_fn=self.trainval_root
                 / "splits"
-                / f"t{self.trainval_split}"
+                / self.trainval_split
                 / "labels_val.json",
                 dims=self.dims,
             )
@@ -77,7 +79,7 @@ class CocoDataModule(LightningDataModule):
                 data_dir=self.trainval_root,
                 manifest_fn=self.trainval_root
                 / "splits"
-                / f"t{self.trainval_split}"
+                / self.trainval_split
                 / "labels_cal.json",
                 dims=self.dims,
             )
@@ -94,9 +96,15 @@ class CocoDataModule(LightningDataModule):
                 self._data_val = ds
 
         elif stage == "test":
+            if self.test_split is not None:
+                manifest_fn = (
+                    self.test_root / "splits" / self.test_split / "labels_test.json"
+                )
+            else:
+                manifest_fn = self.test_root / "labels.json"
             self._data_test = CocoSegmentationDataset(
                 data_dir=self.test_root,
-                manifest_fn=self.test_root / "labels.json",
+                manifest_fn=manifest_fn,
                 dims=self.dims,
             )
 

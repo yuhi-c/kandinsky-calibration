@@ -1,0 +1,24 @@
+# @package _global_
+
+defaults:
+  - override /data: coco.yaml
+  - override /model: segmentation.yaml
+  - override /paths: default.yaml
+  - override /extras: default.yaml
+  - override /hydra: default.yaml
+
+tags: ["pilot"]
+
+task_name: "eval"
+
+data:
+  trainval_split: "pilot"
+  test_split: "pilot"
+  num_workers: 4
+
+model:
+  net:
+    in_channels: 3
+    out_channels: 2
+
+ckpt_path: ???

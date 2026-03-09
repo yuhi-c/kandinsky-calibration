@@ -1,0 +1,25 @@
+# @package _global_
+
+defaults:
+  - override /data: coco.yaml
+  - override /model: segmentation.yaml
+  - override /callbacks: default_calibrate.yaml
+  - override /trainer: default.yaml
+
+tags: ["pilot"]
+
+data:
+  batch_size: 16
+  trainval_split: "pilot"
+  num_workers: 4
+
+model:
+  net:
+    in_channels: 3
+    out_channels: 2
+
+class_idx: 1
+
+callbacks:
+  calibrate:
+    method: "pixel"

@@ -1,7 +1,7 @@
 _target_: src.data.coco_datamodule.CocoDataModule
 trainval_root: ${oc.env:DATA_TRAINVAL_ROOT}
 test_root: ${oc.env:DATA_TEST_ROOT}
-trainval_split: "1000"
+trainval_split: "t1000"
 batch_size: 32
 dims: [320, 240] # [w, h]
 num_workers: 0

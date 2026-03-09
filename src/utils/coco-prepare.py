@@ -4,7 +4,7 @@ import fiftyone as fo
 import fiftyone.zoo as foz
 
 # this is where fiftyone will download the dataset
-fo.config.dataset_zoo_dir = "<target fiftyone dataset zoo dir>"
+fo.config.dataset_zoo_dir = "/home/yuhix/data/fiftyone"
 
 # this is where fiftyone will export the subset containing only the person class
 trainval_dir = "data/coco/trainval"

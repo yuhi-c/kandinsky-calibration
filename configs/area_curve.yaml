@@ -14,6 +14,12 @@ tags: ["dev"]
 # Calibrated checkpoint produced by `src/calibrate.py` (contains nc_curves)
 ckpt_path: ???
 
+# Test split name (null = use test_root/labels.json; "pilot" = use splits/pilot/labels_test.json)
+data:
+  test_split: "pilot"
+  trainval_split: "pilot"
+  num_workers: 4
+
 # Foreground channel index (0=background, 1=person)
 fg_class_idx: 1
 

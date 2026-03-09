@@ -31,7 +31,7 @@ class CocoSegmentationDataset(data.Dataset):
         self.coco = COCO(self.manifest_fn)
         self.ids = list(self.coco.imgs.keys())
 
-        self.category_ids = [49]  # person
+        self.category_ids = [50]  # person (fiftyone re-indexes alphabetically)
         self.categories = self.coco.loadCats(self.category_ids)
         self.dims = dims
 
