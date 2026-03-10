@@ -34,6 +34,11 @@ n_score_thresholds: 101
 selection_metric: balanced_accuracy
 direction: ge
 
+# area0 binning (pixels at alpha=0)
+# default bins correspond to: [0,10000), [10000,30000), [30000,inf)
+area0_bins: [0, 10000, 30000, 1000000000]
+min_bin_samples: 20
+
 # null means all images in the split
 max_cal_images: null
 max_test_images: null

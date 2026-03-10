@@ -26,6 +26,7 @@ class SplitCurves:
     image_indices: np.ndarray
     ious: np.ndarray
     area_ratios: np.ndarray
+    area0_pixels: np.ndarray
     alphas: np.ndarray
 
 
@@ -58,6 +59,7 @@ def _compute_split_curves(
     image_indices: List[int] = []
     ious: List[float] = []
     area_ratios_all: List[np.ndarray] = []
+    area0_pixels: List[float] = []
 
     fg_nc_curves = nc_curves[:, fg_class_idx]
     n_curve_points = int(nc_curves.shape[0])
@@ -95,6 +97,7 @@ def _compute_split_curves(
                 image_indices.append(image_counter)
                 ious.append(iou)
                 area_ratios_all.append(area_ratios)
+                area0_pixels.append(area0)
                 image_counter += 1
 
             if max_images is not None and image_counter >= max_images:
@@ -104,7 +107,18 @@ def _compute_split_curves(
         image_indices=np.asarray(image_indices, dtype=int),
         ious=np.asarray(ious, dtype=float),
         area_ratios=np.asarray(area_ratios_all, dtype=float),
+        area0_pixels=np.asarray(area0_pixels, dtype=float),
         alphas=np.asarray(alphas, dtype=float),
+    )
+
+
+def _subset_split_curves(split_curves: SplitCurves, mask: np.ndarray) -> SplitCurves:
+    return SplitCurves(
+        image_indices=split_curves.image_indices[mask],
+        ious=split_curves.ious[mask],
+        area_ratios=split_curves.area_ratios[mask],
+        area0_pixels=split_curves.area0_pixels[mask],
+        alphas=split_curves.alphas,
     )
 
 
@@ -219,24 +233,124 @@ def _apply_rule(
     metrics = _compute_binary_metrics(y_true, y_pred)
 
     rows: List[Dict[str, Any]] = []
-    for image_idx, iou, score, pred, actual in zip(
+    for image_idx, iou, score, pred, actual, area0 in zip(
         split_curves.image_indices,
         split_curves.ious,
         scores,
         y_pred,
         y_true,
+        split_curves.area0_pixels,
     ):
         rows.append(
             {
                 "image_idx": int(image_idx),
                 "iou": float(iou),
                 "score": float(score),
+                "area0_pixels": float(area0),
                 "pred_low_iou": int(bool(pred)),
                 "actual_low_iou": int(bool(actual)),
             }
         )
 
     return rows, metrics
+
+
+def _build_bin_specs(edges: List[float]) -> List[Dict[str, Any]]:
+    if len(edges) < 2:
+        raise ValueError("area0_bins must contain at least two edges")
+    if any(edges[i] >= edges[i + 1] for i in range(len(edges) - 1)):
+        raise ValueError("area0_bins must be strictly increasing")
+
+    specs: List[Dict[str, Any]] = []
+    for i in range(len(edges) - 1):
+        lo = float(edges[i])
+        hi = float(edges[i + 1])
+        label = f"[{int(lo)},{int(hi)})" if np.isfinite(hi) else f"[{int(lo)},inf)"
+        specs.append({"lo": lo, "hi": hi, "label": label})
+    return specs
+
+
+def _apply_rule_by_bins(
+    *,
+    split_curves: SplitCurves,
+    bin_specs: List[Dict[str, Any]],
+    rules_by_label: Dict[str, Dict[str, Any]],
+    iou_threshold: float,
+) -> Tuple[List[Dict[str, Any]], Dict[str, float], Dict[str, Dict[str, float]]]:
+    rows: List[Dict[str, Any]] = []
+
+    y_true_all: List[bool] = []
+    y_pred_all: List[bool] = []
+    y_true_per_bin: Dict[str, List[bool]] = {b["label"]: [] for b in bin_specs}
+    y_pred_per_bin: Dict[str, List[bool]] = {b["label"]: [] for b in bin_specs}
+
+    for image_idx, iou, area0, area_ratio_curve in zip(
+        split_curves.image_indices,
+        split_curves.ious,
+        split_curves.area0_pixels,
+        split_curves.area_ratios,
+    ):
+        matched = None
+        for b in bin_specs:
+            if b["lo"] <= area0 < b["hi"]:
+                matched = b
+                break
+        if matched is None:
+            # Should not happen with sensible edges; skip safely.
+            continue
+
+        rule = rules_by_label[matched["label"]]
+        alpha_idx = int(np.argmin(np.abs(split_curves.alphas - float(rule["alpha"]))))
+        score = float(area_ratio_curve[alpha_idx])
+
+        if rule["direction"] == "ge":
+            pred = score >= float(rule["score_threshold"])
+        else:
+            pred = score <= float(rule["score_threshold"])
+
+        actual = float(iou) <= iou_threshold
+
+        rows.append(
+            {
+                "image_idx": int(image_idx),
+                "iou": float(iou),
+                "score": score,
+                "area0_pixels": float(area0),
+                "bin_label": matched["label"],
+                "alpha_used": float(rule["alpha"]),
+                "score_threshold_used": float(rule["score_threshold"]),
+                "direction_used": rule["direction"],
+                "pred_low_iou": int(bool(pred)),
+                "actual_low_iou": int(bool(actual)),
+            }
+        )
+
+        y_true_all.append(bool(actual))
+        y_pred_all.append(bool(pred))
+        y_true_per_bin[matched["label"]].append(bool(actual))
+        y_pred_per_bin[matched["label"]].append(bool(pred))
+
+    overall_metrics = _compute_binary_metrics(np.asarray(y_true_all), np.asarray(y_pred_all))
+
+    per_bin_metrics: Dict[str, Dict[str, float]] = {}
+    for label in y_true_per_bin.keys():
+        if len(y_true_per_bin[label]) == 0:
+            per_bin_metrics[label] = {
+                "n": 0,
+                "accuracy": float("nan"),
+                "balanced_accuracy": float("nan"),
+                "precision": float("nan"),
+                "recall": float("nan"),
+                "specificity": float("nan"),
+                "f1": float("nan"),
+            }
+            continue
+
+        m = _compute_binary_metrics(np.asarray(y_true_per_bin[label]), np.asarray(y_pred_per_bin[label]))
+        m["n"] = len(y_true_per_bin[label])
+        per_bin_metrics[label] = m
+
+    return rows, overall_metrics, per_bin_metrics
 
 
 def _write_csv(path: Path, rows: List[Dict[str, Any]], fieldnames: List[str]) -> None:
@@ -282,6 +396,28 @@ def _build_split_report(
     return "\n".join(lines)
 
 
+def _build_bin_report(
+    *,
+    split_name: str,
+    per_bin_metrics: Dict[str, Dict[str, float]],
+    rules_by_label: Dict[str, Dict[str, Any]],
+    iou_threshold: float,
+) -> str:
+    lines = [f"[{split_name} per-bin]"]
+    for label, metrics in per_bin_metrics.items():
+        rule = rules_by_label[label]
+        lines.append(
+            f"bin={label}: area_ratio(alpha={float(rule['alpha']):.3f}) {rule['direction']} {float(rule['score_threshold']):.6f} => IoU <= {iou_threshold:.3f}"
+        )
+        lines.append(
+            "  "
+            f"n={int(metrics.get('n', 0))}, "
+            f"acc={metrics['accuracy']:.4f}, bacc={metrics['balanced_accuracy']:.4f}, "
+            f"prec={metrics['precision']:.4f}, rec={metrics['recall']:.4f}, spec={metrics['specificity']:.4f}, f1={metrics['f1']:.4f}"
+        )
+    return "\n".join(lines)
+
+
 def _plot_rule_scatter(path: Path, rows: List[Dict[str, Any]], iou_threshold: float, rule: Dict[str, Any], title: str) -> None:
     ious = np.asarray([row["iou"] for row in rows], dtype=float)
     scores = np.asarray([row["score"] for row in rows], dtype=float)
@@ -301,6 +437,35 @@ def _plot_rule_scatter(path: Path, rows: List[Dict[str, Any]], iou_threshold: fl
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=160)
     plt.close()
+
+
+def _plot_rule_scatter_per_bin(
+    *,
+    out_dir: Path,
+    rows: List[Dict[str, Any]],
+    iou_threshold: float,
+    rules_by_label: Dict[str, Dict[str, Any]],
+    split_name: str,
+) -> None:
+    labels = sorted({str(r.get("bin_label", "UNKNOWN")) for r in rows})
+    for label in labels:
+        bin_rows = [r for r in rows if str(r.get("bin_label", "UNKNOWN")) == label]
+        if len(bin_rows) == 0:
+            continue
+
+        rule = rules_by_label.get(label)
+        if rule is None:
+            # Fallback for unexpected labels.
+            continue
+
+        safe_label = label.replace("[", "").replace("]", "").replace(",", "_").replace(" ", "")
+        _plot_rule_scatter(
+            out_dir / f"{split_name}_rule_scatter_bin_{safe_label}.png",
+            bin_rows,
+            iou_threshold,
+            rule,
+            title=f"{split_name.capitalize()} split ({label})",
+        )
 
 
 @utils.task_wrapper
@@ -329,6 +494,8 @@ def run_iou_rule(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     eta = float(cfg.eta)
     base_seg_threshold = float(cfg.base_seg_threshold)
     iou_threshold = float(cfg.iou_threshold)
+    area0_bins = [float(v) for v in cfg.area0_bins]
+    min_bin_samples = int(cfg.min_bin_samples)
 
     datamodule.setup(stage="calibrate")
     cal_loader = datamodule.val_dataloader()
@@ -358,7 +525,7 @@ def run_iou_rule(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         max_images=cfg.get("max_test_images"),
     )
 
-    best_rule, search_rows = _search_rule(
+    global_rule, search_rows_global = _search_rule(
         split_curves=calibration_curves,
         iou_threshold=iou_threshold,
         n_score_thresholds=int(cfg.n_score_thresholds),
@@ -366,14 +533,45 @@ def run_iou_rule(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         direction=str(cfg.direction),
     )
 
-    cal_rows, cal_metrics = _apply_rule(
+    bin_specs = _build_bin_specs(area0_bins)
+    search_rows: List[Dict[str, Any]] = []
+    rules_by_label: Dict[str, Dict[str, Any]] = {}
+    for b in bin_specs:
+        mask = (calibration_curves.area0_pixels >= b["lo"]) & (calibration_curves.area0_pixels < b["hi"])
+        n_bin = int(mask.sum())
+
+        if n_bin < min_bin_samples:
+            rule = {**global_rule, "bin_label": b["label"], "n_bin": n_bin, "fallback_to_global": 1}
+            rules_by_label[b["label"]] = rule
+            continue
+
+        sub = _subset_split_curves(calibration_curves, mask)
+        best_rule_bin, rows_bin = _search_rule(
+            split_curves=sub,
+            iou_threshold=iou_threshold,
+            n_score_thresholds=int(cfg.n_score_thresholds),
+            selection_metric=str(cfg.selection_metric),
+            direction=str(cfg.direction),
+        )
+        rule = {**best_rule_bin, "bin_label": b["label"], "n_bin": n_bin, "fallback_to_global": 0}
+        rules_by_label[b["label"]] = rule
+        for row in rows_bin:
+            search_rows.append({**row, "bin_label": b["label"], "n_bin": n_bin})
+
+    # include global search rows for traceability
+    for row in search_rows_global:
+        search_rows.append({**row, "bin_label": "GLOBAL", "n_bin": int(len(calibration_curves.ious))})
+
+    cal_rows, cal_metrics, cal_metrics_per_bin = _apply_rule_by_bins(
         split_curves=calibration_curves,
-        rule=best_rule,
+        bin_specs=bin_specs,
+        rules_by_label=rules_by_label,
         iou_threshold=iou_threshold,
     )
-    test_rows, test_metrics = _apply_rule(
+    test_rows, test_metrics, test_metrics_per_bin = _apply_rule_by_bins(
         split_curves=test_curves,
-        rule=best_rule,
+        bin_specs=bin_specs,
+        rules_by_label=rules_by_label,
         iou_threshold=iou_threshold,
     )
 
@@ -384,6 +582,8 @@ def run_iou_rule(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         out_dir / "rule_search.csv",
         search_rows,
         [
+            "bin_label",
+            "n_bin",
             "alpha",
             "score_threshold",
             "direction",
@@ -403,21 +603,48 @@ def run_iou_rule(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     _write_csv(
         out_dir / "calibration_predictions.csv",
         cal_rows,
-        ["image_idx", "iou", "score", "pred_low_iou", "actual_low_iou"],
+        [
+            "image_idx",
+            "iou",
+            "score",
+            "area0_pixels",
+            "bin_label",
+            "alpha_used",
+            "score_threshold_used",
+            "direction_used",
+            "pred_low_iou",
+            "actual_low_iou",
+        ],
     )
     _write_csv(
         out_dir / "test_predictions.csv",
         test_rows,
-        ["image_idx", "iou", "score", "pred_low_iou", "actual_low_iou"],
+        [
+            "image_idx",
+            "iou",
+            "score",
+            "area0_pixels",
+            "bin_label",
+            "alpha_used",
+            "score_threshold_used",
+            "direction_used",
+            "pred_low_iou",
+            "actual_low_iou",
+        ],
     )
 
     with (out_dir / "selected_rule.json").open("w") as f:
         json.dump(
             {
-                "selected_rule": best_rule,
+                "global_rule": global_rule,
+                "selected_rules_by_area0_bin": rules_by_label,
+                "area0_bins": area0_bins,
+                "min_bin_samples": min_bin_samples,
                 "selection_metric": str(cfg.selection_metric),
                 "calibration_metrics": cal_metrics,
                 "test_metrics": test_metrics,
+                "calibration_metrics_per_bin": cal_metrics_per_bin,
+                "test_metrics_per_bin": test_metrics_per_bin,
             },
             f,
             indent=2,
@@ -427,51 +654,89 @@ def run_iou_rule(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         out_dir / "calibration_rule_scatter.png",
         cal_rows,
         iou_threshold,
-        best_rule,
+        global_rule,
         title="Calibration split",
+    )
+    _plot_rule_scatter_per_bin(
+        out_dir=out_dir,
+        rows=cal_rows,
+        iou_threshold=iou_threshold,
+        rules_by_label=rules_by_label,
+        split_name="calibration",
     )
     _plot_rule_scatter(
         out_dir / "test_rule_scatter.png",
         test_rows,
         iou_threshold,
-        best_rule,
+        global_rule,
         title="Test split",
+    )
+    _plot_rule_scatter_per_bin(
+        out_dir=out_dir,
+        rows=test_rows,
+        iou_threshold=iou_threshold,
+        rules_by_label=rules_by_label,
+        split_name="test",
     )
 
     calibration_report = _build_split_report(
         split_name="calibration",
         rows=cal_rows,
         metrics=cal_metrics,
-        rule=best_rule,
+        rule=global_rule,
         iou_threshold=iou_threshold,
     )
     test_report = _build_split_report(
         split_name="test",
         rows=test_rows,
         metrics=test_metrics,
-        rule=best_rule,
+        rule=global_rule,
+        iou_threshold=iou_threshold,
+    )
+
+    cal_bin_report = _build_bin_report(
+        split_name="calibration",
+        per_bin_metrics=cal_metrics_per_bin,
+        rules_by_label=rules_by_label,
+        iou_threshold=iou_threshold,
+    )
+    test_bin_report = _build_bin_report(
+        split_name="test",
+        per_bin_metrics=test_metrics_per_bin,
+        rules_by_label=rules_by_label,
         iou_threshold=iou_threshold,
     )
 
     report_path = out_dir / "classification_report.txt"
-    report_path.write_text(calibration_report + "\n\n" + test_report + "\n")
+    report_path.write_text(
+        calibration_report
+        + "\n\n"
+        + cal_bin_report
+        + "\n\n"
+        + test_report
+        + "\n\n"
+        + test_bin_report
+        + "\n"
+    )
 
-    log.info("Selected IoU rule:")
+    log.info("Selected GLOBAL IoU rule:")
     log.info(
         "area_ratio(alpha=%.3f) %s %.6f => IoU <= %.3f",
-        float(best_rule["alpha"]),
-        best_rule["direction"],
-        float(best_rule["score_threshold"]),
+        float(global_rule["alpha"]),
+        global_rule["direction"],
+        float(global_rule["score_threshold"]),
         iou_threshold,
     )
+    log.info("Area0 bin-specific rules: %s", rules_by_label)
     log.info("Calibration metrics: %s", cal_metrics)
     log.info("Test metrics: %s", test_metrics)
     log.info("Test classification report:\n%s", test_report)
+    log.info("Test per-bin report:\n%s", test_bin_report)
     log.info("Wrote classification report to: %s", report_path)
 
     metric_dict = {
-        "selected_alpha": float(best_rule["alpha"]),
-        "selected_score_threshold": float(best_rule["score_threshold"]),
+        "selected_alpha_global": float(global_rule["alpha"]),
+        "selected_score_threshold_global": float(global_rule["score_threshold"]),
         "calibration_balanced_accuracy": float(cal_metrics["balanced_accuracy"]),
         "test_balanced_accuracy": float(test_metrics["balanced_accuracy"]),
         "test_f1": float(test_metrics["f1"]),
