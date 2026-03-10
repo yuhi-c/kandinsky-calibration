@@ -1,0 +1,39 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - data: coco
+  - model: segmentation
+  - paths: default
+  - extras: default
+  - hydra: default
+  - optional experiment: null
+
+task_name: "iou_rule"
+tags: ["dev"]
+
+ckpt_path: ???
+
+data:
+  trainval_split: "pilot"
+  test_split: "pilot"
+  num_workers: 0
+
+fg_class_idx: 1
+base_seg_threshold: 0.5
+alpha_min: 0.0
+alpha_max: 0.9
+alpha_steps: 51
+eta: 1.0e-6
+
+# target definition: images with IoU <= iou_threshold are treated as positives
+iou_threshold: 0.3
+
+# threshold search on calibration split
+n_score_thresholds: 101
+selection_metric: balanced_accuracy
+direction: ge
+
+# null means all images in the split
+max_cal_images: null
+max_test_images: null

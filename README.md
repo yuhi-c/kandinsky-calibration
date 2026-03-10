@@ -302,6 +302,178 @@ Then generate:
 
 ---
 
+## Quick Commands
+
+Below is the actual command sequence for this pilot experiment.
+
+### 0. Load environment variables
+
+```bash
+source ~/.zshrc
+conda activate kandinsky
+```
+
+### 1. Create the pilot split
+
+```bash
+python src/utils/pilot-split.py
+```
+
+This creates:
+
+- `train`: 300 images
+- `val`: 50 images
+- `calibration`: 100 images
+- `test`: 100 images
+
+### 2. Train the pilot model
+
+```bash
+python src/train.py experiment=train_pilot
+```
+
+Checkpoint output:
+
+```bash
+logs/train/runs/train_pilot/<timestamp>/checkpoints/last.ckpt
+```
+
+### 3. Evaluate the trained model
+
+```bash
+python src/eval.py experiment=eval_pilot ckpt_path=logs/train/runs/train_pilot/<timestamp>/checkpoints/last.ckpt
+```
+
+Output directory:
+
+```bash
+logs/eval/runs/eval_pilot/<timestamp>/
+```
+
+### 4. Run pixel-wise calibration
+
+```bash
+python src/calibrate.py experiment=cal_pilot ckpt_path=logs/train/runs/train_pilot/<timestamp>/checkpoints/last.ckpt
+```
+
+Calibrated checkpoint:
+
+```bash
+logs/calibrate/runs/cal_pilot/<timestamp>/cmodel.ckpt
+```
+
+### 5. Generate area curves
+
+Important: `area_curve.py` needs `+experiment=...` instead of `experiment=...`.
+
+```bash
+python src/area_curve.py +experiment=area_curve_pilot ckpt_path=logs/calibrate/runs/cal_pilot/<timestamp>/cmodel.ckpt
+```
+
+Current recommended sweep / stabilization settings:
+
+```bash
+python src/area_curve.py +experiment=area_curve_pilot \
+   ckpt_path=logs/calibrate/runs/cal_pilot/<timestamp>/cmodel.ckpt \
+   alpha_max=0.9 alpha_steps=51 w=3 epsilon=0.005 rho=0.1
+```
+
+Output directory:
+
+```bash
+logs/area_curve/runs/area_curve_pilot/<timestamp>/area_curves/
+```
+
+Important outputs:
+
+```bash
+logs/area_curve/runs/area_curve_pilot/<timestamp>/area_curves/summary.csv
+logs/area_curve/runs/area_curve_pilot/<timestamp>/area_curves/curves/*.png
+```
+
+### 6. Plot scatter from summary.csv
+
+Default scatter:
+
+```bash
+python src/utils/plot_summary_scatter.py \
+   --summary_csv logs/area_curve/runs/area_curve_pilot/<timestamp>/area_curves/summary.csv
+```
+
+Plot any metric against IoU:
+
+```bash
+python src/utils/plot_summary_scatter.py \
+   --summary_csv logs/area_curve/runs/area_curve_pilot/<timestamp>/area_curves/summary.csv \
+   --x_col iou \
+   --y_col auc_area_ratio
+```
+
+Other useful `y_col` values:
+
+- `tau_stab`
+- `auc_area_ratio`
+- `alpha_at_10_shrink`
+- `alpha_at_20_shrink`
+- `alpha_at_50_shrink`
+
+### 7. Learn an IoU classification rule from calibration data
+
+This step fits a rule of the form:
+
+```bash
+area_ratio(alpha=a) >= threshold  =>  IoU <= x
+```
+
+The rule is selected on the calibration split, then applied to the test split.
+
+```bash
+python src/iou_rule.py experiment=iou_rule_pilot \
+   ckpt_path=logs/calibrate/runs/cal_pilot/<timestamp>/cmodel.ckpt \
+   iou_threshold=0.3
+```
+
+In the current pilot setup, the rule search is restricted to:
+
+```bash
+alpha in [0.05, 0.3]
+```
+
+Useful overrides:
+
+```bash
+# try a different IoU cutoff
+python src/iou_rule.py experiment=iou_rule_pilot \
+   ckpt_path=logs/calibrate/runs/cal_pilot/<timestamp>/cmodel.ckpt \
+   iou_threshold=0.2
+
+# optimize a different metric
+python src/iou_rule.py experiment=iou_rule_pilot \
+   ckpt_path=logs/calibrate/runs/cal_pilot/<timestamp>/cmodel.ckpt \
+   iou_threshold=0.3 \
+   selection_metric=f1
+
+# allow the search to decide whether large or small area_ratio indicates low IoU
+python src/iou_rule.py experiment=iou_rule_pilot \
+   ckpt_path=logs/calibrate/runs/cal_pilot/<timestamp>/cmodel.ckpt \
+   iou_threshold=0.3 \
+   direction=auto
+```
+
+IoU-rule outputs:
+
+```bash
+logs/iou_rule/runs/iou_rule_pilot/<timestamp>/iou_rule/selected_rule.json
+logs/iou_rule/runs/iou_rule_pilot/<timestamp>/iou_rule/rule_search.csv
+logs/iou_rule/runs/iou_rule_pilot/<timestamp>/iou_rule/calibration_predictions.csv
+logs/iou_rule/runs/iou_rule_pilot/<timestamp>/iou_rule/test_predictions.csv
+logs/iou_rule/runs/iou_rule_pilot/<timestamp>/iou_rule/classification_report.txt
+logs/iou_rule/runs/iou_rule_pilot/<timestamp>/iou_rule/calibration_rule_scatter.png
+logs/iou_rule/runs/iou_rule_pilot/<timestamp>/iou_rule/test_rule_scatter.png
+```
+
+---
+
 ## Expected Result
 
 The expected trend is:

@@ -11,12 +11,13 @@ tags: ["pilot"]
 data:
   batch_size: 16
   trainval_split: "pilot"
-  num_workers: 4
+  num_workers: 0
 
 model:
   net:
     in_channels: 3
     out_channels: 2
+    channels: 64
 
 class_idx: 1
 

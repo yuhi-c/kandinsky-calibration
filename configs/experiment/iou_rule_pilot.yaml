@@ -1,0 +1,23 @@
+# @package _global_
+
+tags: ["pilot"]
+
+data:
+  trainval_split: "pilot"
+  test_split: "pilot"
+  num_workers: 0
+
+model:
+  net:
+    in_channels: 3
+    out_channels: 2
+    channels: 64
+
+alpha_min: 0.05
+alpha_max: 0.3
+alpha_steps: 26
+
+iou_threshold: 0.3
+n_score_thresholds: 101
+selection_metric: balanced_accuracy
+direction: ge

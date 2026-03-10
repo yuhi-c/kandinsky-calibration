@@ -24,6 +24,10 @@ class ImageCurveResult:
     image_idx: int
     iou: float
     tau_stab: float
+    auc_area_ratio: float
+    alpha_at_10_shrink: float
+    alpha_at_20_shrink: float
+    alpha_at_50_shrink: float
 
 
 def _safe_iou(pred_mask: torch.Tensor, target_mask: torch.Tensor, eps: float = 1e-12) -> float:
@@ -67,6 +71,27 @@ def _tau_stab(
     return float("nan")
 
 
+def _alpha_at_shrink(alphas: np.ndarray, area_ratios: np.ndarray, shrink: float) -> float:
+    if not (0.0 <= shrink <= 1.0):
+        raise ValueError("shrink must satisfy 0 <= shrink <= 1")
+
+    shrink_curve = 1.0 - area_ratios
+    hits = np.flatnonzero(shrink_curve >= shrink)
+    if len(hits) == 0:
+        return float("nan")
+    return float(alphas[hits[0]])
+
+
+def _auc_area_ratio(alphas: np.ndarray, area_ratios: np.ndarray) -> float:
+    if len(alphas) < 2:
+        return float("nan")
+    width = float(alphas[-1] - alphas[0])
+    if width <= 0:
+        return float("nan")
+    # Normalize by alpha-range so values are easier to compare across sweeps.
+    return float(np.trapz(area_ratios, alphas) / width)
+
+
 def _plot_curve(
     *,
     out_path: Path,
@@ -106,7 +131,7 @@ def run_area_curve(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     assert cfg.ckpt_path
 
     log.info(f"Loading checkpoint: {cfg.ckpt_path}")
-    ckpt = torch.load(cfg.ckpt_path, map_location="cpu")
+    ckpt = torch.load(cfg.ckpt_path, map_location="cpu", weights_only=False)
     if "nc_curves" not in ckpt:
         raise KeyError(
             "Checkpoint does not contain 'nc_curves'. Run calibration first (src/calibrate.py)."
@@ -187,6 +212,10 @@ def run_area_curve(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                     epsilon=float(cfg.epsilon),
                     rho=float(cfg.rho),
                 )
+                auc_area_ratio = _auc_area_ratio(alphas, area_ratios)
+                alpha_at_10_shrink = _alpha_at_shrink(alphas, area_ratios, 0.10)
+                alpha_at_20_shrink = _alpha_at_shrink(alphas, area_ratios, 0.20)
+                alpha_at_50_shrink = _alpha_at_shrink(alphas, area_ratios, 0.50)
 
                 plot_path = curves_dir / f"image_{image_counter:05d}.png"
                 _plot_curve(
@@ -198,7 +227,17 @@ def run_area_curve(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                     tau_stab=tau,
                 )
 
-                results.append(ImageCurveResult(image_idx=image_counter, iou=iou, tau_stab=tau))
+                results.append(
+                    ImageCurveResult(
+                        image_idx=image_counter,
+                        iou=iou,
+                        tau_stab=tau,
+                        auc_area_ratio=auc_area_ratio,
+                        alpha_at_10_shrink=alpha_at_10_shrink,
+                        alpha_at_20_shrink=alpha_at_20_shrink,
+                        alpha_at_50_shrink=alpha_at_50_shrink,
+                    )
+                )
                 image_counter += 1
 
             if max_images is not None and image_counter >= max_images:
@@ -206,15 +245,48 @@ def run_area_curve(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     summary_path = out_dir / "summary.csv"
     with summary_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["image_idx", "iou", "tau_stab"])
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "image_idx",
+                "iou",
+                "tau_stab",
+                "auc_area_ratio",
+                "alpha_at_10_shrink",
+                "alpha_at_20_shrink",
+                "alpha_at_50_shrink",
+            ],
+        )
         writer.writeheader()
         for r in results:
-            writer.writerow({"image_idx": r.image_idx, "iou": r.iou, "tau_stab": r.tau_stab})
+            writer.writerow(
+                {
+                    "image_idx": r.image_idx,
+                    "iou": r.iou,
+                    "tau_stab": r.tau_stab,
+                    "auc_area_ratio": r.auc_area_ratio,
+                    "alpha_at_10_shrink": r.alpha_at_10_shrink,
+                    "alpha_at_20_shrink": r.alpha_at_20_shrink,
+                    "alpha_at_50_shrink": r.alpha_at_50_shrink,
+                }
+            )
 
     metric_dict = {
         "num_images": len(results),
         "mean_iou": float(np.nanmean([r.iou for r in results])) if results else float("nan"),
         "mean_tau_stab": float(np.nanmean([r.tau_stab for r in results]))
+        if results
+        else float("nan"),
+        "mean_auc_area_ratio": float(np.nanmean([r.auc_area_ratio for r in results]))
+        if results
+        else float("nan"),
+        "mean_alpha_at_10_shrink": float(np.nanmean([r.alpha_at_10_shrink for r in results]))
+        if results
+        else float("nan"),
+        "mean_alpha_at_20_shrink": float(np.nanmean([r.alpha_at_20_shrink for r in results]))
+        if results
+        else float("nan"),
+        "mean_alpha_at_50_shrink": float(np.nanmean([r.alpha_at_50_shrink for r in results]))
         if results
         else float("nan"),
     }

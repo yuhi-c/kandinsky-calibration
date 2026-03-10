@@ -9,10 +9,13 @@ Filtering criteria (per README):
   - total person-mask area ratio between 1% and 40%
 
 Split sizes:
-  - train:       300  (from trainval)
-  - calibration: 100  (from trainval)
-  - val:          50  (from trainval, for training monitoring)
-  - test:        100  (from test / COCO-val)
+    - train:       300  (from trainval)
+    - calibration: 300  (from trainval)
+    - val:          50  (from trainval, for training monitoring)
+    - test:        100  (from test / COCO-val)
+
+If N_CAL is increased above the original 100, this script preserves the original
+train/val/base-calibration samples and appends only the extra calibration images.
 
 Outputs (trainval):
   DATA_TRAINVAL_ROOT/splits/pilot/labels_train.json
@@ -43,8 +46,9 @@ TEST_ROOT = Path(
 # -----------------------------------------------------------------------
 N_TRAIN = 300
 N_VAL = 50
-N_CAL = 100
+N_CAL = 300
 N_TEST = 100
+BASE_N_CAL = 100
 
 # -----------------------------------------------------------------------
 # Filtering hyperparameters
@@ -123,16 +127,37 @@ def main():
     accepted_tv = filter_images(labels_tv, person_cat_id)
     print(f"  images passing filter: {len(accepted_tv)} / {len(labels_tv['images'])}")
 
-    need_tv = N_TRAIN + N_VAL + N_CAL
-    if len(accepted_tv) < need_tv:
+    if N_CAL < BASE_N_CAL:
+        raise ValueError(f"N_CAL must be >= {BASE_N_CAL} to preserve the original split")
+
+    base_need_tv = N_TRAIN + N_VAL + BASE_N_CAL
+    if len(accepted_tv) < base_need_tv:
         raise ValueError(
-            f"Not enough filtered images: need {need_tv}, got {len(accepted_tv)}"
+            f"Not enough filtered images: need {base_need_tv}, got {len(accepted_tv)}"
         )
 
-    sampled_tv = random.sample(accepted_tv, need_tv)
-    train_imgs = sampled_tv[:N_TRAIN]
-    val_imgs   = sampled_tv[N_TRAIN : N_TRAIN + N_VAL]
-    cal_imgs   = sampled_tv[N_TRAIN + N_VAL :]
+    # Preserve the original split construction used when BASE_N_CAL=100:
+    # first sample train/val/base-calibration together, then append only the
+    # extra calibration images from the remaining pool.
+    base_sampled_tv = random.sample(accepted_tv, base_need_tv)
+    train_imgs = base_sampled_tv[:N_TRAIN]
+    val_imgs = base_sampled_tv[N_TRAIN : N_TRAIN + N_VAL]
+    base_cal_imgs = base_sampled_tv[N_TRAIN + N_VAL :]
+
+    extra_cal_needed = N_CAL - BASE_N_CAL
+    if extra_cal_needed > 0:
+        used_ids = {img["id"] for img in base_sampled_tv}
+        remaining_tv = [img for img in accepted_tv if img["id"] not in used_ids]
+        if len(remaining_tv) < extra_cal_needed:
+            raise ValueError(
+                f"Not enough remaining filtered images to extend calibration: "
+                f"need {extra_cal_needed}, got {len(remaining_tv)}"
+            )
+        extra_cal_imgs = random.sample(remaining_tv, extra_cal_needed)
+    else:
+        extra_cal_imgs = []
+
+    cal_imgs = base_cal_imgs + extra_cal_imgs
 
     out_tv = TRAINVAL_ROOT / "splits" / "pilot"
     out_tv.mkdir(parents=True, exist_ok=True)
