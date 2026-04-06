@@ -6,10 +6,12 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import rootutils
+
+rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
 
 def compute_spearman(x: np.ndarray, y: np.ndarray) -> float:
-    # Spearman = Pearson(rank(x), rank(y))
     x_rank = pd.Series(x).rank(method="average").to_numpy()
     y_rank = pd.Series(y).rank(method="average").to_numpy()
     return float(np.corrcoef(x_rank, y_rank)[0, 1])
@@ -29,13 +31,12 @@ def compute_corr(x: np.ndarray, y: np.ndarray) -> tuple[float, float, int]:
     return pearson, spearman, n
 
 
-def plot_scatter(
-    df: pd.DataFrame,
-    x_col: str,
-    y_col: str,
-    out_png: Path,
-) -> tuple[float, float, int]:
-    x = df[x_col].to_numpy(dtype=float)
+def sanitize_name(name: str) -> str:
+    return "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in name)
+
+
+def plot_scatter(df: pd.DataFrame, y_col: str, out_png: Path) -> tuple[float, float, int]:
+    x = df["iou"].to_numpy(dtype=float)
     y = df[y_col].to_numpy(dtype=float)
 
     finite_mask = np.isfinite(x) & np.isfinite(y)
@@ -46,10 +47,10 @@ def plot_scatter(
 
     plt.figure(figsize=(6, 5))
     plt.scatter(x_f, y_f, alpha=0.75, s=22)
-    plt.xlabel(x_col)
+    plt.xlabel("iou")
     plt.ylabel(y_col)
     plt.title(
-        f"{x_col} vs {y_col}\n"
+        f"IoU vs {y_col}\n"
         f"Pearson={pearson:.3f}, Spearman={spearman:.3f}, n={n}"
     )
     plt.grid(alpha=0.25)
@@ -61,50 +62,54 @@ def plot_scatter(
     return pearson, spearman, n
 
 
-def sanitize_name(name: str) -> str:
-    return "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in name)
+def select_tau_columns(df: pd.DataFrame, tau_prefix: str, include_base: bool) -> list[str]:
+    tau_cols: list[str] = []
+    if include_base and "tau_stab" in df.columns:
+        tau_cols.append("tau_stab")
+
+    tau_cols.extend(
+        col for col in df.columns if col.startswith(tau_prefix) and col not in tau_cols
+    )
+    return tau_cols
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Plot scatter(s) for IoU correlations from summary.csv"
+        description="Plot only tau_stab scatter(s) from area_curv_stab summary.csv"
     )
     parser.add_argument("--summary_csv", type=str, required=True, help="Path to summary.csv")
     parser.add_argument(
         "--mode",
         type=str,
-        default="iou_vs_all",
-        choices=["single", "iou_vs_all", "iou_vs_tau_sweep"],
+        default="all_tau",
+        choices=["single", "all_tau"],
         help=(
-            "single: one scatter using --y_col\n"
-            "iou_vs_all: generate iou vs every other numeric column\n"
-            "iou_vs_tau_sweep: generate iou vs tau_stab sweep columns only"
+            "single: plot only one tau column from --y_col\n"
+            "all_tau: plot tau_stab plus all tau sweep columns"
         ),
     )
     parser.add_argument(
         "--y_col",
         type=str,
-        default=None,
-        help="Column to use for y-axis in single mode (x-axis is fixed to iou)",
+        default="tau_stab",
+        help="Tau column to plot in single mode",
     )
     parser.add_argument(
         "--out_png",
         type=str,
         default=None,
-        help="Output png path in single mode",
-    )
-    parser.add_argument(
-        "--exclude_cols",
-        type=str,
-        nargs="*",
-        default=["image_idx"],
-        help="Columns to exclude from auto plotting",
+        help="Optional output png path in single mode",
     )
     parser.add_argument(
         "--tau_prefix",
         type=str,
         default="tau_stab__",
-        help="Column prefix used to detect tau_stab sweep outputs",
+        help="Prefix used by tau sweep columns",
+    )
+    parser.add_argument(
+        "--include_base",
+        action="store_true",
+        help="Include the base tau_stab column in all_tau mode",
     )
     args = parser.parse_args()
 
@@ -113,37 +118,24 @@ def main() -> None:
         raise FileNotFoundError(f"summary.csv not found: {summary_path}")
 
     df = pd.read_csv(summary_path)
-
     if "iou" not in df.columns:
         raise ValueError("'iou' column not found in summary.csv")
 
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    numeric_cols = [c for c in numeric_cols if c not in set(args.exclude_cols)]
-
-    if len(numeric_cols) < 2:
-        raise ValueError("Need at least two numeric columns to plot.")
-
-    out_root = summary_path.parent / "scatter_plots"
+    out_root = summary_path.parent / "stab_plots"
     out_root.mkdir(parents=True, exist_ok=True)
 
     corr_rows: list[dict[str, object]] = []
 
     if args.mode == "single":
-        if args.y_col is None:
-            raise ValueError("--mode single requires --y_col")
-
         if args.y_col not in df.columns:
-            raise ValueError(f"y_col not found in summary.csv: {args.y_col}")
-        if args.y_col == "iou":
-            raise ValueError("--y_col must not be 'iou' in single mode")
+            raise ValueError(f"Tau column not found in summary.csv: {args.y_col}")
 
         out_png = (
             Path(args.out_png)
             if args.out_png is not None
-            else out_root / "iou_vs_all" / f"iou_vs_{sanitize_name(args.y_col)}.png"
+            else out_root / f"iou_vs_{sanitize_name(args.y_col)}.png"
         )
-
-        pearson, spearman, n = plot_scatter(df, "iou", args.y_col, out_png)
+        pearson, spearman, n = plot_scatter(df, args.y_col, out_png)
         corr_rows.append(
             {
                 "x_col": "iou",
@@ -154,22 +146,21 @@ def main() -> None:
                 "out_png": str(out_png),
             }
         )
-
     else:
-        if args.mode == "iou_vs_tau_sweep":
-            targets = [c for c in numeric_cols if c.startswith(args.tau_prefix)]
-            if not targets:
-                raise ValueError(
-                    f"No numeric columns found with tau prefix '{args.tau_prefix}'."
-                )
-            out_subdir = "iou_vs_tau_sweep"
-        else:
-            targets = [c for c in numeric_cols if c != "iou"]
-            out_subdir = "iou_vs_all"
+        tau_cols = select_tau_columns(
+            df,
+            tau_prefix=args.tau_prefix,
+            include_base=args.include_base or args.tau_prefix == "tau_stab",
+        )
+        if not tau_cols:
+            raise ValueError(
+                "No tau_stab columns found. Expected 'tau_stab' and/or columns starting with "
+                f"'{args.tau_prefix}'."
+            )
 
-        for y_col in targets:
-            out_png = out_root / out_subdir / f"iou_vs_{sanitize_name(y_col)}.png"
-            pearson, spearman, n = plot_scatter(df, "iou", y_col, out_png)
+        for y_col in tau_cols:
+            out_png = out_root / f"iou_vs_{sanitize_name(y_col)}.png"
+            pearson, spearman, n = plot_scatter(df, y_col, out_png)
             corr_rows.append(
                 {
                     "x_col": "iou",
@@ -188,7 +179,7 @@ def main() -> None:
     print(f"Saved correlation table: {corr_csv}")
     print(f"Generated {len(corr_df)} plot(s).")
     if len(corr_df) > 0:
-        print(corr_df.sort_values('spearman', ascending=False).to_string(index=False))
+        print(corr_df.sort_values("spearman", ascending=False).to_string(index=False))
 
 
 if __name__ == "__main__":

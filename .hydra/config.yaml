@@ -1,0 +1,99 @@
+task_name: train
+tags:
+- coco-person
+train: true
+test: false
+compile: false
+ckpt_path: logs/train/runs/train_coco-person_t1000/2026-04-02_13-39-44/checkpoints/last.ckpt
+seed: null
+data:
+  _target_: src.data.coco_datamodule.CocoDataModule
+  trainval_root: ${oc.env:DATA_TRAINVAL_ROOT}
+  test_root: ${oc.env:DATA_TEST_ROOT}
+  trainval_split: t1000
+  batch_size: 32
+  dims:
+  - 320
+  - 240
+  num_workers: 0
+  augmentations:
+  - _target_: torchvision.transforms.RandomHorizontalFlip
+    p: 0.5
+  - _target_: torchvision.transforms.RandomAffine
+    degrees: 5
+    translate:
+    - 0.1
+    - 0.1
+    scale:
+    - 0.8
+    - 1.2
+model:
+  _target_: src.models.seg_module.SegLitModule
+  optimizer:
+    _target_: torch.optim.Adam
+    _partial_: true
+    lr: 0.0001
+    weight_decay: 0
+  net:
+    _target_: src.models.components.unet.UNet
+    in_channels: 3
+    out_channels: 2
+    channels: 128
+  loss:
+    _target_: src.utils.loss.TopKPixelCrossEntropyLoss
+    k_frac: 0.5
+  scheduler:
+    _target_: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts
+    _partial_: true
+    T_0: 15
+callbacks:
+  model_checkpoint:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    filename: epoch_{epoch:03d}
+    monitor: null
+    verbose: false
+    save_last: true
+    save_top_k: -1
+    mode: max
+    auto_insert_metric_name: false
+    save_weights_only: false
+    every_n_train_steps: null
+    train_time_interval: null
+    every_n_epochs: 30
+    save_on_train_epoch_end: null
+  model_summary:
+    _target_: lightning.pytorch.callbacks.RichModelSummary
+    max_depth: -1
+logger:
+  tensorboard:
+    _target_: lightning.pytorch.loggers.tensorboard.TensorBoardLogger
+    save_dir: ${paths.output_dir}/tensorboard/
+    name: null
+    log_graph: false
+    default_hp_metric: true
+    prefix: ''
+trainer:
+  _target_: lightning.pytorch.trainer.Trainer
+  default_root_dir: ${paths.output_dir}
+  min_epochs: 1
+  max_epochs: 2000
+  accelerator: gpu
+  devices: 2
+  check_val_every_n_epoch: 5
+  deterministic: false
+  num_sanity_val_steps: 0
+  log_every_n_steps: 20
+  strategy: ddp
+  num_nodes: 1
+  sync_batchnorm: true
+paths:
+  root_dir: ${oc.env:PROJECT_ROOT}
+  data_dir: ${paths.root_dir}/data/
+  log_dir: ${paths.root_dir}/logs/
+  output_dir: ${hydra:runtime.output_dir}
+  work_dir: ${hydra:runtime.cwd}
+extras:
+  ignore_warnings: false
+  enforce_tags: true
+  print_config: true

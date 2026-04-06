@@ -1,0 +1,44 @@
+# @package _global_
+
+defaults:
+  - override /data: coco.yaml
+  - override /model: segmentation.yaml
+  - override /paths: default.yaml
+  - override /extras: default.yaml
+  - override /hydra: default.yaml
+
+tags: ["coco-person", "yuhi"]
+
+task_name: "area_curv_stab"
+
+ckpt_path: ???
+
+data:
+  eval_source: "trainval"
+  eval_subset: "val"
+  test_split: null
+  num_workers: 0
+
+model:
+  net:
+    in_channels: 3
+    out_channels: 2
+    channels: 128
+
+fg_class_idx: 1
+base_seg_threshold: 0.5
+alpha_min: 0.0
+alpha_max: 0.9
+alpha_steps: 51
+eta: 1.0e-6
+w: 3
+epsilon: 5.0e-3
+rho: 0.1
+
+tau_stab_sweep:
+  enabled: false
+  w_values: []
+  epsilon_values: []
+  rho_values: []
+
+max_images: 100

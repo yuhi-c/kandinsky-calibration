@@ -1,0 +1,58 @@
+# @package _global_
+
+defaults:
+  - /data: coco.yaml
+  - /model: segmentation.yaml
+  - /paths: default.yaml
+  - /extras: default.yaml
+  - /hydra: default.yaml
+  - _self_
+  - /experiment: null
+
+task_name: "area_curve"
+tags: ["dev"]
+
+# Calibrated checkpoint produced by `src/calibrate.py` (contains nc_curves)
+ckpt_path: ???
+
+# Evaluation data source:
+# - "test": use test_root/labels.json or test_root/splits/<test_split>/labels_test.json
+# - "trainval": use trainval_root/splits/<trainval_split>/labels_{train,val,cal}.json
+data:
+  eval_source: "trainval"
+  eval_subset: "val"
+  test_split: null
+  trainval_split: "yuhi"
+  num_workers: 4
+
+# Foreground channel index (0=background, 1=person)
+fg_class_idx: 1
+
+# Base segmentation threshold for IoU reference
+base_seg_threshold: 0.5
+
+# Alpha sweep (miscoverage); prediction set shrinks as alpha increases
+alpha_min: 0.0
+alpha_max: 0.5
+alpha_steps: 51
+
+# Area ratio normalization constant
+eta: 1.0e-6
+
+# Stabilization hyperparameters (see README)
+w: 5
+epsilon: 5.0e-3
+rho: 0.2
+
+# Optional tau_stab hyperparameter sweep.
+# When enabled, summary.csv will include additional columns like:
+#   tau_stab__w_1__eps_0p001__rho_0p05
+#   tau_stab__w_3__eps_0p005__rho_0p1
+tau_stab_sweep:
+  enabled: false
+  w_values: []
+  epsilon_values: []
+  rho_values: []
+
+# Limit number of test images processed (null = all)
+max_images: 50

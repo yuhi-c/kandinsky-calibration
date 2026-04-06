@@ -5,9 +5,11 @@ from typing import Union
 import PIL
 import torch
 import torch.utils.data as data
-from PIL import Image
+from PIL import Image, ImageFile
 from pycocotools.coco import COCO
 from torchvision import transforms as tf
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 class CocoSegmentationDataset(data.Dataset):

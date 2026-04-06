@@ -473,7 +473,7 @@ def run_iou_rule(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     assert cfg.ckpt_path
 
     log.info(f"Loading checkpoint: {cfg.ckpt_path}")
-    ckpt = torch.load(cfg.ckpt_path, map_location="cpu", weights_only=False)
+    ckpt = utils.load_checkpoint(cfg.ckpt_path, map_location="cpu")
     if "nc_curves" not in ckpt:
         raise KeyError("Checkpoint does not contain 'nc_curves'. Run calibration first.")
 

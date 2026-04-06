@@ -1,0 +1,10 @@
+defaults:
+  - default
+
+# Single-GPU trainer profile for this machine's V100 setup.
+# Select the physical GPU with CUDA_VISIBLE_DEVICES when launching.
+accelerator: gpu
+devices: 1
+
+# Keep single-GPU training simple and stable for resume runs.
+strategy: auto

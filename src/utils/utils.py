@@ -2,6 +2,7 @@ import warnings
 from importlib.util import find_spec
 from typing import Any, Callable, Dict, Tuple
 
+import torch
 from omegaconf import DictConfig
 
 from src.utils import pylogger, rich_utils
@@ -33,6 +34,14 @@ def extras(cfg: DictConfig) -> None:
     if cfg.extras.get("print_config"):
         log.info("Printing config tree with Rich! <cfg.extras.print_config=True>")
         rich_utils.print_config_tree(cfg, resolve=True, save_to_file=True)
+
+
+def load_checkpoint(path: str, map_location: str = "cpu") -> Dict[str, Any]:
+    """Load checkpoints across both old and new torch versions."""
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
 
 
 def task_wrapper(task_func: Callable) -> Callable:

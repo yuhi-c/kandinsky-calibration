@@ -54,7 +54,7 @@ def calibrate(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     # Torch 2.6 changed torch.load default to weights_only=True, which can break
     # Lightning's implicit checkpoint loading for older checkpoints.
-    checkpoint = torch.load(cfg.ckpt_path, map_location="cpu", weights_only=False)
+    checkpoint = utils.load_checkpoint(cfg.ckpt_path, map_location="cpu")
     model.load_state_dict(checkpoint["state_dict"], strict=True)
     trainer.validate(model=model, dataloaders=datamodule.val_dataloader())
 

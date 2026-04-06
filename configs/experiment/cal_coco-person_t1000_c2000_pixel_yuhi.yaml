@@ -6,12 +6,12 @@ defaults:
   - override /callbacks: default_calibrate.yaml
   - override /trainer: default.yaml
 
-tags: ["pilot"]
+tags: ["coco-person"]
 
 data:
-  batch_size: 16
-  trainval_split: "pilot"
-  num_workers: 4
+  trainval_split: "yuhi"
+  batch_size: 24
+  cal_trim: 2000
 
 model:
   net:

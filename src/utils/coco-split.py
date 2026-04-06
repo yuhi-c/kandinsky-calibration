@@ -6,7 +6,7 @@ from pathlib import Path
 n_train = 1000
 n_val = 1000
 
-coco_trainval_root = Path("/home/yuhix/school/Lab/kandisky-data/coco/trainval")
+coco_trainval_root = Path("data/coco/trainval")
 out_dir = coco_trainval_root / f"splits/t{str(n_train)}"
 out_dir.mkdir(exist_ok=True, parents=True)
 

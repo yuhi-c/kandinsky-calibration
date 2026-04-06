@@ -4,11 +4,12 @@ import fiftyone as fo
 import fiftyone.zoo as foz
 
 # this is where fiftyone will download the dataset
-fo.config.dataset_zoo_dir = "/home/yuhix/data/fiftyone"
+fo.config.dataset_zoo_dir = "/home/chiba/data/fiftyone"
 
 # this is where fiftyone will export the subset containing only the person class
-trainval_dir = "data/coco/trainval"
-test_dir = "data/coco/test"
+trainval_dir = "/home/chiba/research/kandinsky/kandinsky-data/coco/trainval"
+test_dir = "/home/chiba/research/kandinsky/kandinsky-data/coco/test"
+
 
 # We use the train split for training, validation, and calibration,
 # and the validation split as test data

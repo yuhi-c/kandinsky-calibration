@@ -161,3 +161,6 @@ rsync.excludes
 scripts/*
 *.out
 outputs/
+
+# Memo
+.MEMO.md

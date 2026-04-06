@@ -6,15 +6,15 @@ defaults:
   - override /callbacks: default.yaml
   - override /trainer: default.yaml
 
-tags: ["pilot"]
+tags: ["coco-person"]
 
 trainer:
-  log_every_n_steps: 10
-  max_epochs: 250
+  log_every_n_steps: 20
+  max_epochs: 2000
 
 data:
-  batch_size: 16
-  trainval_split: "pilot"
+  batch_size: 32
+  trainval_split: "yuhi"
   num_workers: 0
 
 model:

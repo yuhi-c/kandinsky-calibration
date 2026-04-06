@@ -171,45 +171,31 @@ and compare the distribution of `tau_stab`.
 
 ---
 
-## Dataset Subset
-
-Because the available GPU is **RTX 3060 Ti 8GB**, the experiment is intentionally kept small.
 
 ### Initial Split
 
-A lightweight first split is:
+- **train**: 1000 images
+- **calibration**: 1000 images
+- **test**: 2000 images
 
-- **train**: 300 images
-- **calibration**: 100 images
-- **test**: 100 images
-
-This is only meant to produce a first scatter plot and check whether the hypothesis is plausible.
+These follow the original paper's setting
 
 ---
 
 ## COCO-person Filtering Rule
 
-To avoid extremely difficult or degenerate examples in the first pilot run, we filter candidate images using the following conditions:
+To avoid extremely difficult or degenerate examples in the first pilot run, and considering this is just experiment, we filter candidate images using the following conditions:
 
 - the image contains at least **one person**
-- total person-mask area ratio is between **1% and 40%**
+- total person-mask area ratio is between **10% and 60%**
 - the number of persons is **1**
 
 After filtering, we randomly sample images and split them into:
 
-- train: 300
-- calibration: 100
-- test: 100
+- train: 1000
+- validation: 1000
+- calibration: all remaining filtered trainval images
 
-### Reason for These Conditions
-
-These constraints are introduced to avoid unstable cases in the first experiment:
-
-- very small objects can make the curve noisy,
-- very large objects can dominate the image from the beginning,
-- too many persons can introduce crowding effects that may dominate uncertainty behavior.
-
----
 
 ## Training Strategy
 
@@ -321,10 +307,9 @@ python src/utils/pilot-split.py
 
 This creates:
 
-- `train`: 300 images
-- `val`: 50 images
-- `calibration`: 100 images
-- `test`: 100 images
+- `train`: 1000 images
+- `val`: 1000 images
+- `calibration`: All other remaining images
 
 ### 2. Train the pilot model
 
