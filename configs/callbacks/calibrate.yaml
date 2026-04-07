@@ -1,3 +1,4 @@
 calibrate:
   _target_: src.callbacks.calibrate.CalibrateCallback
   method: "pixel"
+  nc_curve_points: 100

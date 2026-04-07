@@ -23,3 +23,4 @@ class_idx: 1
 callbacks:
   calibrate:
     method: "pixel"
+    nc_curve_points: 1000

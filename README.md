@@ -262,15 +262,6 @@ This produces per-image PNGs and a `summary.csv` (IoU + `tau_stab`) under `logs/
 python src/area_curve.py ckpt_path=/path/to/logs/calibrate/runs/.../cmodel.ckpt
 ```
 
-Useful overrides:
-
-```bash
-# process only first 100 test images
-python src/area_curve.py ckpt_path=... max_images=100
-
-# change alpha sweep and stabilization hyperparameters
-python src/area_curve.py ckpt_path=... alpha_max=0.8 alpha_steps=81 w=5 epsilon=0.005 rho=0.2
-```
 
 ### Step 5. Compare Against IoU
 

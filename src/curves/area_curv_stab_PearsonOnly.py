@@ -298,16 +298,30 @@ def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]
     nc_curves: torch.Tensor = ckpt["nc_curves"]
     n_curve_points = int(nc_curves.shape[0])
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    log.info(f"Using device: {device}")
-    model.to(device)
-    nc_curves = nc_curves.to(device)
-
     alphas = np.linspace(float(cfg.alpha_min), float(cfg.alpha_max), int(cfg.alpha_steps))
     if not (0.0 <= float(cfg.alpha_min) <= float(cfg.alpha_max) <= 1.0):
         raise ValueError("alpha_min/alpha_max must satisfy 0 <= alpha_min <= alpha_max <= 1")
 
     fg_class_idx = int(cfg.fg_class_idx)
+    curve_indices = np.asarray(
+        [_alpha_to_curve_index(float(alpha), n_curve_points) for alpha in alphas],
+        dtype=np.int64,
+    )
+    unique_curve_indices, alpha_curve_lookup = np.unique(curve_indices, return_inverse=True)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    log.info(f"Using device: {device}")
+    model.to(device)
+    fg_nc_curves = nc_curves.index_select(
+        0,
+        torch.as_tensor(unique_curve_indices, dtype=torch.long),
+    )[:, fg_class_idx].to(device)
+    log.info(
+        "Loaded %d/%d curve points onto device for the requested alpha grid",
+        len(unique_curve_indices),
+        n_curve_points,
+    )
+
     eta = float(cfg.eta)
     tau_stab_specs = _build_tau_stab_specs(cfg)
     extra_metric_names = [
@@ -334,7 +348,6 @@ def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]
             fg_probs = seg_probs[:, fg_class_idx]
             fg_targets = targets[:, fg_class_idx] > 0.5
             fg_ncs = 1.0 - fg_probs
-            fg_nc_curves = nc_curves[:, fg_class_idx]
 
             batch_size = images.shape[0]
             for b in range(batch_size):
@@ -346,9 +359,8 @@ def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]
                 gt_pixels = int(fg_targets[b].sum().item())
 
                 areas = np.zeros_like(alphas, dtype=np.float64)
-                for i, alpha in enumerate(alphas):
-                    idx = _alpha_to_curve_index(alpha, n_curve_points)
-                    thr_map = fg_nc_curves[idx]
+                for i, curve_lookup_idx in enumerate(alpha_curve_lookup):
+                    thr_map = fg_nc_curves[int(curve_lookup_idx)]
                     conf_mask = fg_ncs[b] <= thr_map
                     areas[i] = float(conf_mask.sum().item())
 

@@ -14,11 +14,13 @@ class CalibrateCallback(Callback):
         output_dir: Union[str, None] = None,
         cluster_finder: Any = None,
         class_idx: Union[int, None] = None,
+        nc_curve_points: int = 100,
     ):
         super().__init__()
         self.output_dir = output_dir
         self.method = method
         self.class_idx = class_idx
+        self.nc_curve_points = int(nc_curve_points)
         if cluster_finder is not None:
             self.cluster_finder = cluster_finder
 
@@ -41,7 +43,7 @@ class CalibrateCallback(Callback):
 
     def on_validation_epoch_end(self, trainer, pl_module):
         nc_scores = torch.cat(self.nc_scores, dim=0).float()
-        nc_curve_points = 100
+        nc_curve_points = self.nc_curve_points
 
         if self.method == "pixel":
             nc_curves = torch.nanquantile(nc_scores, torch.linspace(0, 1, nc_curve_points), dim=0)
