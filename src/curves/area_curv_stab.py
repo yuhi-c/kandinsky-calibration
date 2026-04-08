@@ -9,7 +9,7 @@ import hydra
 import numpy as np
 import rootutils
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
@@ -57,6 +57,27 @@ def _tau_stab(
     return float("nan")
 
 
+def _parse_alpha_steps_values(alpha_steps_cfg: Any) -> List[int]:
+    if isinstance(alpha_steps_cfg, ListConfig):
+        raw_values = list(alpha_steps_cfg)
+    elif isinstance(alpha_steps_cfg, (list, tuple)):
+        raw_values = list(alpha_steps_cfg)
+    else:
+        raw_values = [alpha_steps_cfg]
+
+    alpha_steps_values: List[int] = []
+    for raw in raw_values:
+        value = int(raw)
+        if value < 2:
+            raise ValueError("Each alpha_steps value must be >= 2")
+        alpha_steps_values.append(value)
+
+    if not alpha_steps_values:
+        raise ValueError("alpha_steps cannot be empty")
+
+    return alpha_steps_values
+
+
 @utils.task_wrapper
 def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     assert cfg.ckpt_path
@@ -83,9 +104,15 @@ def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]
     model.to(device)
     nc_curves = nc_curves.to(device)
 
-    alphas = np.linspace(float(cfg.alpha_min), float(cfg.alpha_max), int(cfg.alpha_steps))
-    if not (0.0 <= float(cfg.alpha_min) <= float(cfg.alpha_max) <= 1.0):
+    alpha_min = float(cfg.alpha_min)
+    alpha_max = float(cfg.alpha_max)
+    if not (0.0 <= alpha_min <= alpha_max <= 1.0):
         raise ValueError("alpha_min/alpha_max must satisfy 0 <= alpha_min <= alpha_max <= 1")
+    alpha_steps_values = _parse_alpha_steps_values(cfg.alpha_steps)
+    total_alpha_tasks = len(alpha_steps_values)
+    log.info(
+        f"Planned alpha-step tasks: total={total_alpha_tasks}, values={alpha_steps_values}"
+    )
 
     fg_class_idx = int(cfg.fg_class_idx)
     eta = float(cfg.eta)
@@ -93,115 +120,268 @@ def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]
     extra_metric_names = [
         spec.metric_name for spec in tau_stab_specs if spec.metric_name != "tau_stab"
     ]
+    tau_patterns_per_alpha_task = len(tau_stab_specs)
+    total_pattern_tasks = total_alpha_tasks * tau_patterns_per_alpha_task
+    log.info(
+        "Planned sweep pattern combinations: "
+        f"per_alpha_steps={tau_patterns_per_alpha_task}, total={total_pattern_tasks}"
+    )
 
-    out_dir = Path(cfg.paths.output_dir) / "area_curv_stab"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    base_out_dir = Path(cfg.paths.output_dir) / "area_curv_stab"
+    base_out_dir.mkdir(parents=True, exist_ok=True)
 
     max_images = cfg.get("max_images")
     max_images = int(max_images) if max_images is not None else None
+    progress_log_interval = int(cfg.get("progress_log_interval", 50))
+    if progress_log_interval <= 0:
+        progress_log_interval = 1
 
-    results: List[ImageTauStabResult] = []
-    image_counter = 0
+    dataset_size: int | None = None
+    if hasattr(eval_loader, "dataset"):
+        try:
+            dataset_size = len(eval_loader.dataset)
+        except TypeError:
+            dataset_size = None
 
-    with torch.inference_mode():
-        for batch in eval_loader:
-            images = batch["image"].to(device)
-            targets = batch["target_segmentation"].to(device)
+    if dataset_size is not None:
+        total_images = min(dataset_size, max_images) if max_images is not None else dataset_size
+    else:
+        total_images = max_images
 
-            out = model(images)
-            seg_probs = torch.sigmoid(out["seg_logits"])
+    if total_images is not None:
+        log.info(f"Planned images per task: total={total_images}")
+    else:
+        log.info(
+            "Planned images per task: total=unknown "
+            "(dataset length unavailable and max_images unset)"
+        )
 
-            fg_probs = seg_probs[:, fg_class_idx]
-            fg_targets = targets[:, fg_class_idx] > 0.5
-            fg_ncs = 1.0 - fg_probs
-            fg_nc_curves = nc_curves[:, fg_class_idx]
+    task_metric_dicts: List[Dict[str, Any]] = []
+    task_summary_paths: List[Path] = []
 
-            batch_size = images.shape[0]
-            for b in range(batch_size):
+    for task_idx, alpha_steps in enumerate(alpha_steps_values, start=1):
+        alpha_done_before = task_idx - 1
+        alpha_remaining_before = total_alpha_tasks - alpha_done_before
+        pattern_done_before = alpha_done_before * tau_patterns_per_alpha_task
+        pattern_remaining_before = total_pattern_tasks - pattern_done_before
+        log.info(
+            f"Task progress: alpha_steps_done={alpha_done_before}/{total_alpha_tasks}, "
+            f"alpha_steps_remaining={alpha_remaining_before}, "
+            f"pattern_done={pattern_done_before}/{total_pattern_tasks}, "
+            f"pattern_remaining={pattern_remaining_before}, "
+            f"starting alpha_steps={alpha_steps}"
+        )
+
+        alphas = np.linspace(alpha_min, alpha_max, alpha_steps)
+        if total_alpha_tasks > 1:
+            out_dir = base_out_dir / f"task_{task_idx:03d}_alpha_steps_{alpha_steps}"
+        else:
+            out_dir = base_out_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        results: List[ImageTauStabResult] = []
+        image_counter = 0
+
+        def _log_progress(done: int, *, force: bool = False) -> None:
+            if done <= 0:
+                return
+            if not force and done % progress_log_interval != 0:
+                return
+
+            if total_images is None:
+                log.info(
+                    f"[alpha_steps={alpha_steps}] Progress: done={done}, remaining=unknown"
+                )
+                return
+
+            remaining = max(total_images - done, 0)
+            log.info(
+                f"[alpha_steps={alpha_steps}] Progress: "
+                f"done={done}/{total_images}, remaining={remaining}"
+            )
+
+        with torch.inference_mode():
+            for batch in eval_loader:
+                images = batch["image"].to(device)
+                targets = batch["target_segmentation"].to(device)
+
+                out = model(images)
+                seg_probs = torch.sigmoid(out["seg_logits"])
+
+                fg_probs = seg_probs[:, fg_class_idx]
+                fg_targets = targets[:, fg_class_idx] > 0.5
+                fg_ncs = 1.0 - fg_probs
+                fg_nc_curves = nc_curves[:, fg_class_idx]
+
+                batch_size = images.shape[0]
+                for b in range(batch_size):
+                    if max_images is not None and image_counter >= max_images:
+                        break
+
+                    base_pred_mask = fg_probs[b] >= float(cfg.base_seg_threshold)
+                    iou = _safe_iou(base_pred_mask, fg_targets[b])
+                    gt_pixels = int(fg_targets[b].sum().item())
+
+                    areas = np.zeros_like(alphas, dtype=np.float64)
+                    for i, alpha in enumerate(alphas):
+                        idx = _alpha_to_curve_index(alpha, n_curve_points)
+                        thr_map = fg_nc_curves[idx]
+                        conf_mask = fg_ncs[b] <= thr_map
+                        areas[i] = float(conf_mask.sum().item())
+
+                    area0 = float(areas[0])
+                    area_ratios = areas / (area0 + eta)
+
+                    tau_metrics = {
+                        spec.metric_name: _tau_stab(
+                            alphas,
+                            area_ratios,
+                            w=spec.w,
+                            epsilon=spec.epsilon,
+                            rho=spec.rho,
+                        )
+                        for spec in tau_stab_specs
+                    }
+
+                    results.append(
+                        ImageTauStabResult(
+                            image_idx=image_counter,
+                            iou=iou,
+                            gt_pixels=gt_pixels,
+                            tau_stab=tau_metrics["tau_stab"],
+                            extra_metrics={k: v for k, v in tau_metrics.items() if k != "tau_stab"},
+                        )
+                    )
+                    image_counter += 1
+                    _log_progress(image_counter)
+
                 if max_images is not None and image_counter >= max_images:
                     break
 
-                base_pred_mask = fg_probs[b] >= float(cfg.base_seg_threshold)
-                iou = _safe_iou(base_pred_mask, fg_targets[b])
-                gt_pixels = int(fg_targets[b].sum().item())
+        _log_progress(image_counter, force=True)
+        if total_images is not None:
+            log.info(
+                f"[alpha_steps={alpha_steps}] Finished processing: "
+                f"done={image_counter}/{total_images}, "
+                f"remaining={max(total_images - image_counter, 0)}"
+            )
+        else:
+            log.info(f"[alpha_steps={alpha_steps}] Finished processing: done={image_counter}, remaining=unknown")
 
-                areas = np.zeros_like(alphas, dtype=np.float64)
-                for i, alpha in enumerate(alphas):
-                    idx = _alpha_to_curve_index(alpha, n_curve_points)
-                    thr_map = fg_nc_curves[idx]
-                    conf_mask = fg_ncs[b] <= thr_map
-                    areas[i] = float(conf_mask.sum().item())
-
-                area0 = float(areas[0])
-                area_ratios = areas / (area0 + eta)
-
-                tau_metrics = {
-                    spec.metric_name: _tau_stab(
-                        alphas,
-                        area_ratios,
-                        w=spec.w,
-                        epsilon=spec.epsilon,
-                        rho=spec.rho,
-                    )
-                    for spec in tau_stab_specs
+        summary_path = out_dir / "summary.csv"
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with summary_path.open("w", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["image_idx", "iou", "gt_pixels", "tau_stab", *extra_metric_names],
+            )
+            writer.writeheader()
+            for r in results:
+                row = {
+                    "image_idx": r.image_idx,
+                    "iou": r.iou,
+                    "gt_pixels": r.gt_pixels,
+                    "tau_stab": r.tau_stab,
                 }
+                row.update(r.extra_metrics)
+                writer.writerow(row)
 
-                results.append(
-                    ImageTauStabResult(
-                        image_idx=image_counter,
-                        iou=iou,
-                        gt_pixels=gt_pixels,
-                        tau_stab=tau_metrics["tau_stab"],
-                        extra_metrics={k: v for k, v in tau_metrics.items() if k != "tau_stab"},
-                    )
-                )
-                image_counter += 1
-
-            if max_images is not None and image_counter >= max_images:
-                break
-
-    summary_path = out_dir / "summary.csv"
-    with summary_path.open("w", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["image_idx", "iou", "gt_pixels", "tau_stab", *extra_metric_names],
-        )
-        writer.writeheader()
-        for r in results:
-            row = {
-                "image_idx": r.image_idx,
-                "iou": r.iou,
-                "gt_pixels": r.gt_pixels,
-                "tau_stab": r.tau_stab,
-            }
-            row.update(r.extra_metrics)
-            writer.writerow(row)
-
-    metric_dict = {
-        "num_images": len(results),
-        "mean_iou": float(np.nanmean([r.iou for r in results])) if results else float("nan"),
-        "mean_gt_pixels": float(np.nanmean([r.gt_pixels for r in results]))
-        if results
-        else float("nan"),
-        "mean_tau_stab": float(np.nanmean([r.tau_stab for r in results]))
-        if results
-        else float("nan"),
-    }
-    for metric_name in extra_metric_names:
-        metric_dict[f"mean_{metric_name}"] = (
-            float(np.nanmean([r.extra_metrics[metric_name] for r in results]))
+        metric_dict = {
+            "alpha_steps": alpha_steps,
+            "num_images": len(results),
+            "mean_iou": float(np.nanmean([r.iou for r in results])) if results else float("nan"),
+            "mean_gt_pixels": float(np.nanmean([r.gt_pixels for r in results]))
             if results
-            else float("nan")
+            else float("nan"),
+            "mean_tau_stab": float(np.nanmean([r.tau_stab for r in results]))
+            if results
+            else float("nan"),
+        }
+        for metric_name in extra_metric_names:
+            metric_dict[f"mean_{metric_name}"] = (
+                float(np.nanmean([r.extra_metrics[metric_name] for r in results]))
+                if results
+                else float("nan")
+            )
+
+        task_metric_dicts.append(metric_dict)
+        task_summary_paths.append(summary_path)
+
+        alpha_done_after = task_idx
+        alpha_remaining_after = total_alpha_tasks - alpha_done_after
+        pattern_done_after = alpha_done_after * tau_patterns_per_alpha_task
+        pattern_remaining_after = total_pattern_tasks - pattern_done_after
+        log.info(
+            f"Task progress: alpha_steps_done={alpha_done_after}/{total_alpha_tasks}, "
+            f"alpha_steps_remaining={alpha_remaining_after}, "
+            f"pattern_done={pattern_done_after}/{total_pattern_tasks}, "
+            f"pattern_remaining={pattern_remaining_after}, "
+            f"finished alpha_steps={alpha_steps}"
         )
+        log.info(f"Wrote tau_stab summary to: {summary_path}")
+
+    if total_alpha_tasks > 1:
+        sweep_summary_path = base_out_dir / "summary_by_alpha_steps.csv"
+        sweep_summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with sweep_summary_path.open("w", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "task_index",
+                    "alpha_steps",
+                    "num_images",
+                    "mean_iou",
+                    "mean_gt_pixels",
+                    "mean_tau_stab",
+                    *[f"mean_{metric_name}" for metric_name in extra_metric_names],
+                    "summary_path",
+                ],
+            )
+            writer.writeheader()
+            for task_index, (task_metric, summary_path) in enumerate(
+                zip(task_metric_dicts, task_summary_paths),
+                start=1,
+            ):
+                row = {
+                    "task_index": task_index,
+                    "alpha_steps": task_metric["alpha_steps"],
+                    "num_images": task_metric["num_images"],
+                    "mean_iou": task_metric["mean_iou"],
+                    "mean_gt_pixels": task_metric["mean_gt_pixels"],
+                    "mean_tau_stab": task_metric["mean_tau_stab"],
+                    "summary_path": str(summary_path),
+                }
+                for metric_name in extra_metric_names:
+                    row[f"mean_{metric_name}"] = task_metric[f"mean_{metric_name}"]
+                writer.writerow(row)
+
+        metric_dict = {
+            "num_alpha_step_tasks": total_alpha_tasks,
+            "num_pattern_tasks": total_pattern_tasks,
+            "mean_iou_over_tasks": float(
+                np.nanmean([task_metric["mean_iou"] for task_metric in task_metric_dicts])
+            ),
+            "mean_tau_stab_over_tasks": float(
+                np.nanmean([task_metric["mean_tau_stab"] for task_metric in task_metric_dicts])
+            ),
+        }
+        object_dict = {
+            "cfg": cfg,
+            "eval_source": eval_source_name,
+            "out_dir": str(base_out_dir),
+            "summary_path": str(sweep_summary_path),
+            "task_summary_paths": [str(path) for path in task_summary_paths],
+        }
+        log.info(f"Wrote alpha_steps sweep summary to: {sweep_summary_path}")
+        return metric_dict, object_dict
 
     object_dict = {
         "cfg": cfg,
         "eval_source": eval_source_name,
-        "out_dir": str(out_dir),
-        "summary_path": str(summary_path),
+        "out_dir": str(base_out_dir),
+        "summary_path": str(task_summary_paths[0]),
     }
-    log.info(f"Wrote tau_stab summary to: {summary_path}")
-    return metric_dict, object_dict
+    return task_metric_dicts[0], object_dict
 
 
 @hydra.main(version_base="1.3", config_path="../../configs", config_name="curv/area_curv_stab.yaml")

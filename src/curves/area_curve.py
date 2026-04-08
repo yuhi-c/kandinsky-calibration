@@ -11,7 +11,7 @@ import numpy as np
 import rootutils
 import torch
 from omegaconf import DictConfig
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
 
@@ -298,6 +298,28 @@ def _build_eval_loader(cfg: DictConfig) -> tuple[DataLoader, str]:
         manifest_fn=manifest_fn,
         dims=tuple(cfg.data.dims),
     )
+
+    # Optional random subsampling for evaluation runs.
+    eval_sample_size = cfg.data.get("eval_sample_size")
+    if eval_sample_size is not None:
+        sample_size = int(eval_sample_size)
+        if sample_size <= 0:
+            raise ValueError("data.eval_sample_size must be >= 1")
+
+        total_size = len(dataset)
+        sample_size = min(sample_size, total_size)
+        sample_seed = int(cfg.data.get("eval_sample_seed", 42))
+
+        rng = np.random.default_rng(sample_seed)
+        sampled_indices = rng.choice(total_size, size=sample_size, replace=False).tolist()
+        dataset = Subset(dataset, sampled_indices)
+        log.info(
+            "Randomly sampled evaluation subset: %d/%d images (seed=%d)",
+            sample_size,
+            total_size,
+            sample_seed,
+        )
+
     dataloader = DataLoader(
         dataset,
         batch_size=int(cfg.data.batch_size),
