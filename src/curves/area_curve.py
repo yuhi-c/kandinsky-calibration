@@ -266,6 +266,67 @@ def _plot_curve(
     plt.close(fig)
 
 
+def _write_curve_csv(
+    *,
+    out_path: Path,
+    image_idx: int,
+    alphas: np.ndarray,
+    areas: np.ndarray,
+    area_ratios: np.ndarray,
+    iou: float,
+    gt_pixels: int,
+    tau_stab: float,
+    curve_indices: np.ndarray | None = None,
+) -> None:
+    if len(alphas) != len(areas) or len(alphas) != len(area_ratios):
+        raise ValueError("alphas, areas, and area_ratios must have same length")
+
+    if curve_indices is not None and len(curve_indices) != len(alphas):
+        raise ValueError("curve_indices must have same length as alphas")
+
+    abs_area_ratio_diff = np.empty_like(area_ratios, dtype=np.float64)
+    abs_area_ratio_diff[0] = np.nan
+    abs_area_ratio_diff[1:] = np.abs(np.diff(area_ratios))
+    shrink = 1.0 - area_ratios
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "image_idx",
+                "iou",
+                "gt_pixels",
+                "tau_stab",
+                "alpha",
+                "curve_index",
+                "area_pixels",
+                "area_ratio",
+                "shrink",
+                "abs_area_ratio_diff",
+            ],
+        )
+        writer.writeheader()
+
+        for i, alpha in enumerate(alphas):
+            writer.writerow(
+                {
+                    "image_idx": image_idx,
+                    "iou": iou,
+                    "gt_pixels": gt_pixels,
+                    "tau_stab": tau_stab,
+                    "alpha": float(alpha),
+                    "curve_index": (
+                        int(curve_indices[i]) if curve_indices is not None else ""
+                    ),
+                    "area_pixels": float(areas[i]),
+                    "area_ratio": float(area_ratios[i]),
+                    "shrink": float(shrink[i]),
+                    "abs_area_ratio_diff": float(abs_area_ratio_diff[i]),
+                }
+            )
+
+
 def _build_eval_loader(cfg: DictConfig) -> tuple[DataLoader, str]:
     eval_source = str(cfg.data.get("eval_source", "test"))
     eval_subset = str(cfg.data.get("eval_subset", "test"))
@@ -346,19 +407,21 @@ def run_area_curve(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     model.load_state_dict(ckpt["state_dict"], strict=True)
     model.eval()
 
+    fg_class_idx = int(cfg.fg_class_idx)
     nc_curves: torch.Tensor = ckpt["nc_curves"]
     n_curve_points = int(nc_curves.shape[0])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info(f"Using device: {device}")
     model.to(device)
-    nc_curves = nc_curves.to(device)
+    # Only the requested foreground class is used downstream, so keep
+    # background curves off GPU to reduce VRAM pressure for large checkpoints.
+    fg_nc_curves = nc_curves[:, fg_class_idx].to(device)
 
     alphas = np.linspace(float(cfg.alpha_min), float(cfg.alpha_max), int(cfg.alpha_steps))
     if not (0.0 <= float(cfg.alpha_min) <= float(cfg.alpha_max) <= 1.0):
         raise ValueError("alpha_min/alpha_max must satisfy 0 <= alpha_min <= alpha_max <= 1")
 
-    fg_class_idx = int(cfg.fg_class_idx)
     eta = float(cfg.eta)
     tau_stab_specs = _build_tau_stab_specs(cfg)
     extra_metric_names = [spec.metric_name for spec in tau_stab_specs if spec.metric_name != "tau_stab"]
@@ -367,6 +430,10 @@ def run_area_curve(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     out_dir.mkdir(parents=True, exist_ok=True)
     curves_dir = out_dir / "curves"
     curves_dir.mkdir(parents=True, exist_ok=True)
+    save_curve_csv = bool(cfg.get("save_curve_csv", False))
+    curve_csv_dir = out_dir / "curve_csvs"
+    if save_curve_csv:
+        curve_csv_dir.mkdir(parents=True, exist_ok=True)
 
     max_images = cfg.get("max_images")
     max_images = int(max_images) if max_images is not None else None
@@ -386,8 +453,6 @@ def run_area_curve(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             fg_targets = targets[:, fg_class_idx] > 0.5
             fg_ncs = 1.0 - fg_probs
 
-            fg_nc_curves = nc_curves[:, fg_class_idx]
-
             batch_size = images.shape[0]
             for b in range(batch_size):
                 if max_images is not None and image_counter >= max_images:
@@ -398,8 +463,10 @@ def run_area_curve(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 gt_pixels = int(fg_targets[b].sum().item())
 
                 areas = np.zeros_like(alphas, dtype=np.float64)
+                curve_indices = np.zeros_like(alphas, dtype=np.int64)
                 for i, alpha in enumerate(alphas):
                     idx = _alpha_to_curve_index(alpha, n_curve_points)
+                    curve_indices[i] = idx
                     thr_map = fg_nc_curves[idx]
                     conf_mask = fg_ncs[b] <= thr_map
                     areas[i] = float(conf_mask.sum().item())
@@ -441,6 +508,19 @@ def run_area_curve(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                     slope_0_3=slope_0_3,
                     knee_alpha_second_diff=knee_alpha_second_diff,
                 )
+                if save_curve_csv:
+                    curve_csv_path = curve_csv_dir / f"image_{image_counter:05d}.csv"
+                    _write_curve_csv(
+                        out_path=curve_csv_path,
+                        image_idx=image_counter,
+                        alphas=alphas,
+                        areas=areas,
+                        area_ratios=area_ratios,
+                        iou=iou,
+                        gt_pixels=gt_pixels,
+                        tau_stab=tau,
+                        curve_indices=curve_indices,
+                    )
 
                 results.append(
                     ImageCurveResult(

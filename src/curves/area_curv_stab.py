@@ -18,7 +18,11 @@ from src.curves.area_curve import (
     _alpha_to_curve_index,
     _build_eval_loader,
     _build_tau_stab_specs,
+    _early_slope,
+    _knee_by_second_diff,
+    _plot_curve,
     _safe_iou,
+    _write_curve_csv,
 )
 
 log = utils.get_pylogger(__name__)
@@ -96,13 +100,16 @@ def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]
     model.load_state_dict(ckpt["state_dict"], strict=True)
     model.eval()
 
+    fg_class_idx = int(cfg.fg_class_idx)
     nc_curves: torch.Tensor = ckpt["nc_curves"]
     n_curve_points = int(nc_curves.shape[0])
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info(f"Using device: {device}")
     model.to(device)
-    nc_curves = nc_curves.to(device)
+    # Only the requested foreground class is used downstream, so keep
+    # background curves off GPU to reduce VRAM pressure for large checkpoints.
+    fg_nc_curves = nc_curves[:, fg_class_idx].to(device)
 
     alpha_min = float(cfg.alpha_min)
     alpha_max = float(cfg.alpha_max)
@@ -114,7 +121,6 @@ def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]
         f"Planned alpha-step tasks: total={total_alpha_tasks}, values={alpha_steps_values}"
     )
 
-    fg_class_idx = int(cfg.fg_class_idx)
     eta = float(cfg.eta)
     tau_stab_specs = _build_tau_stab_specs(cfg)
     extra_metric_names = [
@@ -129,6 +135,8 @@ def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]
 
     base_out_dir = Path(cfg.paths.output_dir) / "area_curv_stab"
     base_out_dir.mkdir(parents=True, exist_ok=True)
+    save_curve_png = bool(cfg.get("save_curve_png", False))
+    save_curve_csv = bool(cfg.get("save_curve_csv", False))
 
     max_images = cfg.get("max_images")
     max_images = int(max_images) if max_images is not None else None
@@ -178,6 +186,12 @@ def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]
         else:
             out_dir = base_out_dir
         out_dir.mkdir(parents=True, exist_ok=True)
+        curves_dir = out_dir / "curves"
+        if save_curve_png:
+            curves_dir.mkdir(parents=True, exist_ok=True)
+        curve_csv_dir = out_dir / "curve_csvs"
+        if save_curve_csv:
+            curve_csv_dir.mkdir(parents=True, exist_ok=True)
 
         results: List[ImageTauStabResult] = []
         image_counter = 0
@@ -211,7 +225,6 @@ def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]
                 fg_probs = seg_probs[:, fg_class_idx]
                 fg_targets = targets[:, fg_class_idx] > 0.5
                 fg_ncs = 1.0 - fg_probs
-                fg_nc_curves = nc_curves[:, fg_class_idx]
 
                 batch_size = images.shape[0]
                 for b in range(batch_size):
@@ -223,14 +236,18 @@ def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]
                     gt_pixels = int(fg_targets[b].sum().item())
 
                     areas = np.zeros_like(alphas, dtype=np.float64)
+                    curve_indices = np.zeros_like(alphas, dtype=np.int64)
                     for i, alpha in enumerate(alphas):
                         idx = _alpha_to_curve_index(alpha, n_curve_points)
+                        curve_indices[i] = idx
                         thr_map = fg_nc_curves[idx]
                         conf_mask = fg_ncs[b] <= thr_map
                         areas[i] = float(conf_mask.sum().item())
 
                     area0 = float(areas[0])
                     area_ratios = areas / (area0 + eta)
+                    slope_0_3 = _early_slope(alphas, area_ratios, end_idx=3)
+                    knee_alpha_second_diff, _ = _knee_by_second_diff(alphas, area_ratios)
 
                     tau_metrics = {
                         spec.metric_name: _tau_stab(
@@ -242,13 +259,42 @@ def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]
                         )
                         for spec in tau_stab_specs
                     }
+                    tau = tau_metrics["tau_stab"]
+
+                    if save_curve_png:
+                        plot_path = curves_dir / f"image_{image_counter:05d}.png"
+                        _plot_curve(
+                            out_path=plot_path,
+                            alphas=alphas,
+                            areas=areas,
+                            area_ratios=area_ratios,
+                            iou=iou,
+                            gt_pixels=gt_pixels,
+                            tau_stab=tau,
+                            slope_0_3=slope_0_3,
+                            knee_alpha_second_diff=knee_alpha_second_diff,
+                        )
+
+                    if save_curve_csv:
+                        curve_csv_path = curve_csv_dir / f"image_{image_counter:05d}.csv"
+                        _write_curve_csv(
+                            out_path=curve_csv_path,
+                            image_idx=image_counter,
+                            alphas=alphas,
+                            areas=areas,
+                            area_ratios=area_ratios,
+                            iou=iou,
+                            gt_pixels=gt_pixels,
+                            tau_stab=tau,
+                            curve_indices=curve_indices,
+                        )
 
                     results.append(
                         ImageTauStabResult(
                             image_idx=image_counter,
                             iou=iou,
                             gt_pixels=gt_pixels,
-                            tau_stab=tau_metrics["tau_stab"],
+                            tau_stab=tau,
                             extra_metrics={k: v for k, v in tau_metrics.items() if k != "tau_stab"},
                         )
                     )
@@ -319,6 +365,10 @@ def run_area_curv_stab(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]
             f"finished alpha_steps={alpha_steps}"
         )
         log.info(f"Wrote tau_stab summary to: {summary_path}")
+        if save_curve_png:
+            log.info(f"Wrote per-image curve PNGs to: {curves_dir}")
+        if save_curve_csv:
+            log.info(f"Wrote per-image curve CSVs to: {curve_csv_dir}")
 
     if total_alpha_tasks > 1:
         sweep_summary_path = base_out_dir / "summary_by_alpha_steps.csv"

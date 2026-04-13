@@ -46,7 +46,7 @@ def plot_scatter(df: pd.DataFrame, y_col: str, out_png: Path) -> tuple[float, fl
     pearson, spearman, n = compute_corr(x, y)
 
     plt.figure(figsize=(6, 5))
-    plt.scatter(x_f, y_f, alpha=0.75, s=22)
+    plt.scatter(x_f, y_f, alpha=0.75, s=2)
     plt.xlabel("iou")
     plt.ylabel(y_col)
     plt.title(

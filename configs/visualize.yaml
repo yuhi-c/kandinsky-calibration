@@ -1,0 +1,32 @@
+# @package _global_
+
+defaults:
+  - paths: default
+  - extras: default
+  - hydra: default
+  - _self_
+
+task_name: "visualize"
+
+tags: ["visualize"]
+
+ckpt_path: ???
+companion_cfg_path: null
+
+save_dir: ${paths.root_dir}/logs/visualize
+
+stage: calibrate
+image_indices: [0, 1, 2]
+alpha_values: [0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0]
+
+fg_class_idx: null
+device: auto
+overlay_alpha: 0.45
+save_original_image: true
+save_gt_mask: true
+save_raw_masks: true
+
+extras:
+  ignore_warnings: false
+  enforce_tags: false
+  print_config: false
